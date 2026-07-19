@@ -62,30 +62,19 @@ fn inspect_media(path: &Path, size: u64) -> AudioMetadata {
     };
     let mut probe_metadata = probe.metadata;
     let mut format = probe.format;
-    let (probe_encoder, probe_settings) = match probe_metadata.get() {
-        Some(metadata) => match metadata.current() {
-            Some(metadata) => (
-                encoder_from_tags(metadata.tags(), StandardTagKey::Encoder),
-                encoder_from_tags(metadata.tags(), StandardTagKey::EncoderSettings),
-            ),
-            None => (None, None),
-        },
-        None => (None, None),
+    let probe_encoder = match probe_metadata.get() {
+        Some(mut metadata) => metadata
+            .skip_to_latest()
+            .and_then(|metadata| encoder_from_tags(metadata.tags())),
+        None => None,
     };
-    let format_encoder = format
-        .metadata()
-        .current()
-        .and_then(|metadata| encoder_from_tags(metadata.tags(), StandardTagKey::Encoder));
-    let format_settings = format
-        .metadata()
-        .current()
-        .and_then(|metadata| encoder_from_tags(metadata.tags(), StandardTagKey::EncoderSettings));
-    let encoder = select_encoder(
-        probe_encoder,
-        format_encoder,
-        probe_settings,
-        format_settings,
-    );
+    let format_encoder = {
+        let mut metadata = format.metadata();
+        metadata
+            .skip_to_latest()
+            .and_then(|metadata| encoder_from_tags(metadata.tags()))
+    };
+    let encoder = probe_encoder.or(format_encoder);
     let track = match format.default_track().or_else(|| format.tracks().first()) {
         Some(track) => track,
         None => return fallback_metadata(path, size),
@@ -162,43 +151,14 @@ fn m4a_sample_entry_channels(entry: &[u8]) -> Option<usize> {
         .map(usize::from)
 }
 
-fn select_encoder(
-    probe_encoder: Option<String>,
-    format_encoder: Option<String>,
-    probe_settings: Option<String>,
-    format_settings: Option<String>,
-) -> Option<String> {
-    probe_encoder
-        .or(format_encoder)
-        .or(probe_settings)
-        .or(format_settings)
-}
+fn encoder_from_tags(tags: &[MetadataTag]) -> Option<String> {
+    let tag_value = |key| {
+        tags.iter()
+            .find(|tag| tag.std_key == Some(key))
+            .map(|tag| tag.value.to_string())
+    };
 
-#[cfg(test)]
-fn encoder_from_metadata_sources<'a>(
-    sources: impl IntoIterator<Item = Option<&'a [MetadataTag]>>,
-) -> Option<String> {
-    let mut sources = sources.into_iter().flatten().map(|tags| {
-        (
-            encoder_from_tags(tags, StandardTagKey::Encoder),
-            encoder_from_tags(tags, StandardTagKey::EncoderSettings),
-        )
-    });
-    let (first_encoder, first_settings) = sources.next().unwrap_or_default();
-    let (second_encoder, second_settings) = sources.next().unwrap_or_default();
-
-    select_encoder(
-        first_encoder,
-        second_encoder,
-        first_settings,
-        second_settings,
-    )
-}
-
-fn encoder_from_tags(tags: &[MetadataTag], key: StandardTagKey) -> Option<String> {
-    tags.iter()
-        .find(|tag| tag.std_key == Some(key))
-        .map(|tag| tag.value.to_string())
+    tag_value(StandardTagKey::Encoder).or_else(|| tag_value(StandardTagKey::EncoderSettings))
 }
 
 fn fallback_metadata(path: &Path, size: u64) -> AudioMetadata {
@@ -251,49 +211,22 @@ mod tests {
     }
 
     #[test]
-    fn extracts_encoder_tag() {
-        let tags = [MetadataTag::new(
+    fn prefers_encoder_tag_and_falls_back_to_encoder_settings() {
+        let encoder = [MetadataTag::new(
             Some(StandardTagKey::Encoder),
             "ENCODER",
             "Lavf57.71.100".into(),
         )];
-
-        assert_eq!(
-            encoder_from_metadata_sources([Some(&tags[..])]),
-            Some("Lavf57.71.100".into())
-        );
-    }
-
-    #[test]
-    fn falls_back_to_encoder_settings_tag() {
-        let tags = [MetadataTag::new(
+        let settings = [MetadataTag::new(
             Some(StandardTagKey::EncoderSettings),
             "ENCODER SETTINGS",
             "-compression_level 8".into(),
         )];
 
+        assert_eq!(encoder_from_tags(&encoder), Some("Lavf57.71.100".into()));
         assert_eq!(
-            encoder_from_metadata_sources([Some(&tags[..])]),
+            encoder_from_tags(&settings),
             Some("-compression_level 8".into())
-        );
-    }
-
-    #[test]
-    fn prefers_probe_metadata_over_format_metadata() {
-        let probe_tags = [MetadataTag::new(
-            Some(StandardTagKey::Encoder),
-            "TSSE",
-            "Lavf58.76.100".into(),
-        )];
-        let format_tags = [MetadataTag::new(
-            Some(StandardTagKey::EncoderSettings),
-            "ENCODER SETTINGS",
-            "-compression_level 8".into(),
-        )];
-
-        assert_eq!(
-            encoder_from_metadata_sources([Some(&probe_tags[..]), Some(&format_tags[..])]),
-            Some("Lavf58.76.100".into())
         );
     }
 

@@ -90,7 +90,14 @@ impl FileTreeNode {
 
     pub fn flatten(&self, expanded_paths: &[PathBuf]) -> Vec<TreeRow> {
         let mut rows = Vec::new();
-        self.append_rows(0, expanded_paths, &mut rows);
+        match self {
+            Self::Directory { children, .. } => {
+                for child in children {
+                    child.append_rows(0, expanded_paths, &mut rows);
+                }
+            }
+            Self::AudioFile { .. } => self.append_rows(0, expanded_paths, &mut rows),
+        }
         rows
     }
 
@@ -197,10 +204,18 @@ mod tests {
     fn preserves_album_cover_in_flattened_rows() {
         let cover = vec![1, 2, 3];
         let tree = FileTreeNode::directory_with_album_cover(
-            PathBuf::from("album"),
-            vec![FileTreeNode::audio(PathBuf::from("album/song.mp3"))],
-            true,
-            Some(Arc::new(cover.clone())),
+            PathBuf::from("music"),
+            vec![
+                FileTreeNode::directory_with_album_cover(
+                    PathBuf::from("music/album"),
+                    vec![FileTreeNode::audio(PathBuf::from("music/album/song.mp3"))],
+                    true,
+                    Some(Arc::new(cover.clone())),
+                ),
+                FileTreeNode::audio(PathBuf::from("music/loose-song.mp3")),
+            ],
+            false,
+            None,
         );
 
         assert_eq!(tree.flatten(&[])[0].album_cover, Some(Arc::new(cover)));
@@ -230,17 +245,24 @@ mod tests {
     fn only_expanded_directories_expose_descendants() {
         let root = FileTreeNode::directory_with_album_cover(
             PathBuf::from("music"),
-            vec![FileTreeNode::directory_with_album_cover(
-                PathBuf::from("music/album"),
-                vec![FileTreeNode::audio(PathBuf::from("music/album/song.mp3"))],
-                false,
-                None,
-            )],
+            vec![
+                FileTreeNode::directory_with_album_cover(
+                    PathBuf::from("music/album"),
+                    vec![FileTreeNode::audio(PathBuf::from("music/album/song.mp3"))],
+                    false,
+                    None,
+                ),
+                FileTreeNode::audio(PathBuf::from("music/loose-song.mp3")),
+            ],
             false,
             None,
         );
 
-        assert_eq!(root.flatten(&[]).len(), 1);
-        assert_eq!(root.flatten(&[PathBuf::from("music/album")]).len(), 2);
+        let collapsed_rows = root.flatten(&[]);
+        assert_eq!(collapsed_rows.len(), 2);
+        assert_eq!(collapsed_rows[0].name, "album");
+        assert_eq!(collapsed_rows[0].depth, 0);
+        assert_eq!(collapsed_rows[1].name, "loose-song.mp3");
+        assert_eq!(root.flatten(&[PathBuf::from("music/album")]).len(), 3);
     }
 }

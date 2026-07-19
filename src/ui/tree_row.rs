@@ -133,6 +133,8 @@ impl FactoryComponent for TreeRowComponent {
                 },
                 gtk::Label {
                     #[watch]
+                    set_class_active: ("regular-file", !self.row.is_directory && !self.row.is_album),
+                    #[watch]
                     set_label: &self.row.name,
                     set_hexpand: true,
                     set_halign: gtk::Align::Start,

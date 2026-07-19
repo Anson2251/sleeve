@@ -47,8 +47,8 @@ pub enum AppMsg {
     DirectoryChosen(PathBuf),
 
     SelectAudioFile(PathBuf),
-    ToggleSidebar,
-    ToggleInspector,
+    SetSidebarVisible(bool),
+    SetInspectorVisible(bool),
     SetField(TagField, String),
     Save,
     RestoreDraft,
@@ -76,6 +76,21 @@ impl AppModel {
             .unwrap_or_else(|| "尚未选择文件".into())
     }
 
+    fn header_title(&self) -> String {
+        let Some(_) = self.selected_file else {
+            return "Sleeve".into();
+        };
+
+        let artist = self.active_draft.artist.trim();
+        let title = self.active_draft.title.trim();
+        match (artist.is_empty(), title.is_empty()) {
+            (true, true) => "Sleeve".into(),
+            (false, true) => format!("Sleeve · {artist}"),
+            (true, false) => format!("Sleeve · {title}"),
+            (false, false) => format!("Sleeve · {artist} · {title}"),
+        }
+    }
+
     fn metadata(&self, value: impl Fn(&crate::models::AudioMetadata) -> Option<&str>) -> String {
         self.selected_file
             .as_ref()
@@ -94,8 +109,10 @@ impl AppModel {
     fn encoder(&self) -> String {
         self.selected_file
             .as_ref()
-            .map(|file| file.metadata.codec.clone())
-            .unwrap_or_else(|| "—".into())
+            .map(|file| file.metadata.codec.trim())
+            .filter(|codec| !codec.is_empty())
+            .unwrap_or("-")
+            .into()
     }
 
     fn cover_hint(&self) -> &str {
@@ -113,6 +130,7 @@ impl AppModel {
 
     fn clear_selection(&mut self) {
         self.selected_file = None;
+        self.inspector_visible = false;
         self.set_selected_path(None);
         self.original_draft = None;
         self.active_draft = TagDraft::default();
@@ -251,8 +269,8 @@ impl Component for AppModel {
         rendered_cover_revision: Cell<u64>,
         rendered_backup_revision: Cell<u64>,
         rendered_draft_revision: Cell<u64>,
-        sidebar_button: gtk::Button,
-        inspector_button: gtk::Button,
+        sidebar_button: gtk::ToggleButton,
+        inspector_button: gtk::ToggleButton,
         syncing: Rc<Cell<bool>>,
         status_label: gtk::Label,
         restore_popover: gtk::Popover,
@@ -284,12 +302,7 @@ impl Component for AppModel {
                     set_orientation: gtk::Orientation::Vertical,
                     set_spacing: 12,
                     set_width_request: 290,
-                    set_margin_all: 16,
-                    gtk::Label {
-                        set_label: "音乐文件",
-                        set_halign: gtk::Align::Start,
-                        add_css_class: "title-4",
-                    },
+                    set_margin_all: 0,
                     gtk::ScrolledWindow {
                         set_vexpand: true,
                         #[local_ref]
@@ -298,200 +311,207 @@ impl Component for AppModel {
                             set_spacing: 2,
                         },
                     },
-                    },
-                    #[wrap(Some)]
-                    set_content = &adw::OverlaySplitView {
-                        set_sidebar_position: gtk::PackType::End,
-                        #[watch]
-                        set_show_sidebar: model.inspector_visible,
-                        set_sidebar_width_fraction: 0.28,
-                        set_min_sidebar_width: 280.0,
-                        set_max_sidebar_width: 420.0,
-                        #[wrap(Some)]
-                        set_content = &gtk::Box {
-                            set_orientation: gtk::Orientation::Horizontal,
-
-                #[name = "editor"]
-                gtk::Box {
-                    set_orientation: gtk::Orientation::Vertical,
-                    set_spacing: 8,
-                    set_hexpand: true,
-                    set_margin_all: 20,
-                    #[watch]
-                    set_sensitive: model.selected_file.is_some(),
-                    gtk::Label {
-                        set_label: "标签信息",
-                        set_halign: gtk::Align::Start,
-                        add_css_class: "title-4",
-                    },
-                    gtk::Label {
-                        #[watch]
-                        set_label: &model.selected_path(),
-                        set_halign: gtk::Align::Start,
-                        set_ellipsize: gtk::pango::EllipsizeMode::Middle,
-                    },
-                    gtk::Label { set_label: "标题", set_halign: gtk::Align::Start },
-                    #[name = "title_entry"]
-                    gtk::Entry {
-                        connect_changed[sender, syncing] => move |entry| {
-                            if !syncing.get() { sender.input(AppMsg::SetField(TagField::Title, entry.text().to_string())); }
-                        },
-                    },
-                    gtk::Label {
-                        #[watch]
-                        set_label: model.active_draft.validation_error(TagField::Title).unwrap_or(""),
-                        #[watch]
-                        set_visible: model.active_draft.validation_error(TagField::Title).is_some(),
-                        add_css_class: "error",
-                        set_halign: gtk::Align::Start,
-                    },
-                    gtk::Label { set_label: "艺人", set_halign: gtk::Align::Start },
-                    #[name = "artist_entry"]
-                    gtk::Entry {
-                        connect_changed[sender, syncing] => move |entry| {
-                            if !syncing.get() { sender.input(AppMsg::SetField(TagField::Artist, entry.text().to_string())); }
-                        },
-                    },
-                    gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::Artist).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::Artist).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                    gtk::Label { set_label: "专辑", set_halign: gtk::Align::Start },
-                    #[name = "album_entry"]
-                    gtk::Entry {
-                        connect_changed[sender, syncing] => move |entry| {
-                            if !syncing.get() { sender.input(AppMsg::SetField(TagField::Album, entry.text().to_string())); }
-                        },
-                    },
-                    gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::Album).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::Album).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                    gtk::Label { set_label: "专辑艺人", set_halign: gtk::Align::Start },
-                    #[name = "album_artist_entry"]
-                    gtk::Entry {
-                        connect_changed[sender, syncing] => move |entry| {
-                            if !syncing.get() { sender.input(AppMsg::SetField(TagField::AlbumArtist, entry.text().to_string())); }
-                        },
-                    },
-                    gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::AlbumArtist).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::AlbumArtist).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                    gtk::Label { set_label: "年份", set_halign: gtk::Align::Start },
-                    #[name = "year_entry"]
-                    gtk::Entry {
-                        connect_changed[sender, syncing] => move |entry| {
-                            if !syncing.get() { sender.input(AppMsg::SetField(TagField::Year, entry.text().to_string())); }
-                        },
-                    },
-                    gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::Year).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::Year).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                    gtk::Label { set_label: "曲目号", set_halign: gtk::Align::Start },
-                    #[name = "track_entry"]
-                    gtk::Entry {
-                        connect_changed[sender, syncing] => move |entry| {
-                            if !syncing.get() { sender.input(AppMsg::SetField(TagField::TrackNumber, entry.text().to_string())); }
-                        },
-                    },
-                    gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::TrackNumber).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::TrackNumber).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                    gtk::Label { set_label: "碟号", set_halign: gtk::Align::Start },
-                    #[name = "disc_entry"]
-                    gtk::Entry {
-                        connect_changed[sender, syncing] => move |entry| {
-                            if !syncing.get() { sender.input(AppMsg::SetField(TagField::DiscNumber, entry.text().to_string())); }
-                        },
-                    },
-                    gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::DiscNumber).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::DiscNumber).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                    gtk::Label { set_label: "流派", set_halign: gtk::Align::Start },
-                    #[name = "genre_entry"]
-                    gtk::Entry {
-                        connect_changed[sender, syncing] => move |entry| {
-                            if !syncing.get() { sender.input(AppMsg::SetField(TagField::Genre, entry.text().to_string())); }
-                        },
-                    },
-                    gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::Genre).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::Genre).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                    gtk::Box {
-                        set_spacing: 8,
-                        set_halign: gtk::Align::End,
-                        gtk::Button { set_label: "还原", connect_clicked => AppMsg::RestoreDraft },
-                        gtk::Button { set_label: "保存", connect_clicked => AppMsg::Save },
-                    },
                 },
-                        },
-                        #[wrap(Some)]
-                        set_sidebar = &gtk::Box {
-                    set_orientation: gtk::Orientation::Vertical,
-                    set_spacing: 12,
-                    set_width_request: 310,
-                    set_margin_all: 16,
+                #[wrap(Some)]
+                set_content = &adw::OverlaySplitView {
+                    set_sidebar_position: gtk::PackType::End,
                     #[watch]
-                    set_sensitive: model.selected_file.is_some(),
-                    gtk::Label { set_label: "元信息与封面", set_halign: gtk::Align::Start, add_css_class: "title-4" },
-                    gtk::Box {
-                        set_spacing: 8,
-                        gtk::Label { set_label: "容器格式", set_hexpand: true, set_halign: gtk::Align::Start },
-                        gtk::Label { #[watch] set_label: &model.container(), set_halign: gtk::Align::End },
-                    },
-                    gtk::Box {
-                        set_spacing: 8,
-                        gtk::Label { set_label: "编码器", set_hexpand: true, set_halign: gtk::Align::Start },
-                        gtk::Label { #[watch] set_label: &model.encoder(), set_halign: gtk::Align::End },
-                    },
-                    gtk::Box {
-                        set_spacing: 8,
-                        gtk::Label { set_label: "时长", set_hexpand: true, set_halign: gtk::Align::Start },
-                        gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.duration.as_deref()), set_halign: gtk::Align::End },
-                    },
-                    gtk::Box {
-                        set_spacing: 8,
-                        gtk::Label { set_label: "平均码率", set_hexpand: true, set_halign: gtk::Align::Start },
-                        gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.bitrate.as_deref()), set_halign: gtk::Align::End },
-                    },
-                    gtk::Box {
-                        set_spacing: 8,
-                        gtk::Label { set_label: "采样率", set_hexpand: true, set_halign: gtk::Align::Start },
-                        gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.sample_rate.as_deref()), set_halign: gtk::Align::End },
-                    },
-                    gtk::Box {
-                        set_spacing: 8,
-                        gtk::Label { set_label: "声道", set_hexpand: true, set_halign: gtk::Align::Start },
-                        gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.channels.as_deref()), set_halign: gtk::Align::End },
-                    },
-                    gtk::Box {
-                        set_spacing: 8,
-                        gtk::Label { set_label: "位深", set_hexpand: true, set_halign: gtk::Align::Start },
-                        gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.bits_per_sample.as_deref()), set_halign: gtk::Align::End },
-                    },
-                    gtk::Box {
-                        set_spacing: 8,
-                        gtk::Label { set_label: "文件大小", set_hexpand: true, set_halign: gtk::Align::Start },
-                        gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.file_size.as_deref()), set_halign: gtk::Align::End },
-                    },
-                    #[name = "cover_frame"]
-                    adw::Clamp {
-                        set_maximum_size: 260,
-                        set_tightening_threshold: 260,
-                        set_halign: gtk::Align::Center,
-                        #[wrap(Some)]
-                        set_child = &gtk::Frame {
-                            #[name = "cover"]
-                            gtk::Picture {
-                                set_width_request: 260,
-                                set_height_request: 260,
-                                set_can_shrink: true,
+                    set_show_sidebar: model.inspector_visible && model.selected_file.is_some(),
+                    set_sidebar_width_fraction: 0.28,
+                    set_min_sidebar_width: 280.0,
+                    set_max_sidebar_width: 420.0,
+                    #[wrap(Some)]
+                    set_content = &gtk::Box {
+                        set_orientation: gtk::Orientation::Horizontal,
+
+                        #[name = "editor"]
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 8,
+                            set_hexpand: true,
+                            set_width_request: 480,
+                            set_margin_all: 20,
+                            #[watch]
+                            set_visible: model.selected_file.is_some(),
+                            gtk::Label {
+                                #[watch]
+                                set_label: &model.selected_path(),
+                                set_halign: gtk::Align::Start,
+                                add_css_class: "title-4",
+                            },
+                            gtk::Label { set_label: " " },
+                            gtk::Label { set_label: "标题", set_halign: gtk::Align::Start },
+                            #[name = "title_entry"]
+                            gtk::Entry {
+                                connect_changed[sender, syncing] => move |entry| {
+                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::Title, entry.text().to_string())); }
+                                },
+                            },
+                            gtk::Label {
+                                #[watch]
+                                set_label: model.active_draft.validation_error(TagField::Title).unwrap_or(""),
+                                #[watch]
+                                set_visible: model.active_draft.validation_error(TagField::Title).is_some(),
+                                add_css_class: "error",
+                                set_halign: gtk::Align::Start,
+                            },
+                            gtk::Label { set_label: "艺人", set_halign: gtk::Align::Start },
+                            #[name = "artist_entry"]
+                            gtk::Entry {
+                                connect_changed[sender, syncing] => move |entry| {
+                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::Artist, entry.text().to_string())); }
+                                },
+                            },
+                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::Artist).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::Artist).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
+                            gtk::Label { set_label: "专辑", set_halign: gtk::Align::Start },
+                            #[name = "album_entry"]
+                            gtk::Entry {
+                                connect_changed[sender, syncing] => move |entry| {
+                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::Album, entry.text().to_string())); }
+                                },
+                            },
+                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::Album).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::Album).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
+                            gtk::Label { set_label: "专辑艺人", set_halign: gtk::Align::Start },
+                            #[name = "album_artist_entry"]
+                            gtk::Entry {
+                                connect_changed[sender, syncing] => move |entry| {
+                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::AlbumArtist, entry.text().to_string())); }
+                                },
+                            },
+                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::AlbumArtist).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::AlbumArtist).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
+                            gtk::Label { set_label: "年份", set_halign: gtk::Align::Start },
+                            #[name = "year_entry"]
+                            gtk::Entry {
+                                connect_changed[sender, syncing] => move |entry| {
+                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::Year, entry.text().to_string())); }
+                                },
+                            },
+                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::Year).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::Year).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
+                            gtk::Label { set_label: "曲目号", set_halign: gtk::Align::Start },
+                            #[name = "track_entry"]
+                            gtk::Entry {
+                                connect_changed[sender, syncing] => move |entry| {
+                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::TrackNumber, entry.text().to_string())); }
+                                },
+                            },
+                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::TrackNumber).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::TrackNumber).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
+                            gtk::Label { set_label: "碟号", set_halign: gtk::Align::Start },
+                            #[name = "disc_entry"]
+                            gtk::Entry {
+                                connect_changed[sender, syncing] => move |entry| {
+                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::DiscNumber, entry.text().to_string())); }
+                                },
+                            },
+                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::DiscNumber).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::DiscNumber).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
+                            gtk::Label { set_label: "流派", set_halign: gtk::Align::Start },
+                            #[name = "genre_entry"]
+                            gtk::Entry {
+                                connect_changed[sender, syncing] => move |entry| {
+                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::Genre, entry.text().to_string())); }
+                                },
+                            },
+                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::Genre).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::Genre).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
+                            gtk::Box {
+                                set_spacing: 8,
+                                set_halign: gtk::Align::End,
+                                gtk::Button { set_label: "还原", connect_clicked => AppMsg::RestoreDraft },
+                                gtk::Button { set_label: "保存", connect_clicked => AppMsg::Save },
                             },
                         },
+                        gtk::Label {
+                            set_label: "请从左侧选择一个音频文件",
+                            set_hexpand: true,
+                            set_vexpand: true,
+                            set_halign: gtk::Align::Center,
+                            set_valign: gtk::Align::Center,
+                            add_css_class: "title-4",
+                            #[watch]
+                            set_visible: model.selected_file.is_none(),
+                        },
                     },
-                    #[name = "cover_dimensions"]
-                    gtk::Label {
-                        set_halign: gtk::Align::Center,
-                        add_css_class: "dim-label",
-                    },
-                    gtk::Label {
+                    #[wrap(Some)]
+                    set_sidebar = &gtk::Box {
+                        set_orientation: gtk::Orientation::Vertical,
+                        set_spacing: 12,
+                        set_width_request: 310,
+                        set_margin_all: 16,
                         #[watch]
-                        set_label: model.cover_hint(),
-                        set_wrap: true,
-                        set_justify: gtk::Justification::Center,
+                        set_sensitive: model.selected_file.is_some(),
+                        gtk::Label { set_label: "元信息与封面", set_halign: gtk::Align::Start, add_css_class: "title-4" },
+                        gtk::Box {
+                            set_spacing: 8,
+                            gtk::Label { set_label: "容器格式", set_hexpand: true, set_halign: gtk::Align::Start },
+                            gtk::Label { #[watch] set_label: &model.container(), set_halign: gtk::Align::End },
+                        },
+                        gtk::Box {
+                            set_spacing: 8,
+                            gtk::Label { set_label: "编码器", set_hexpand: true, set_halign: gtk::Align::Start },
+                            gtk::Label { #[watch] set_label: &model.encoder(), set_halign: gtk::Align::End },
+                        },
+                        gtk::Box {
+                            set_spacing: 8,
+                            gtk::Label { set_label: "时长", set_hexpand: true, set_halign: gtk::Align::Start },
+                            gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.duration.as_deref()), set_halign: gtk::Align::End },
+                        },
+                        gtk::Box {
+                            set_spacing: 8,
+                            gtk::Label { set_label: "平均码率", set_hexpand: true, set_halign: gtk::Align::Start },
+                            gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.bitrate.as_deref()), set_halign: gtk::Align::End },
+                        },
+                        gtk::Box {
+                            set_spacing: 8,
+                            gtk::Label { set_label: "采样率", set_hexpand: true, set_halign: gtk::Align::Start },
+                            gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.sample_rate.as_deref()), set_halign: gtk::Align::End },
+                        },
+                        gtk::Box {
+                            set_spacing: 8,
+                            gtk::Label { set_label: "声道", set_hexpand: true, set_halign: gtk::Align::Start },
+                            gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.channels.as_deref()), set_halign: gtk::Align::End },
+                        },
+                        gtk::Box {
+                            set_spacing: 8,
+                            gtk::Label { set_label: "位深", set_hexpand: true, set_halign: gtk::Align::Start },
+                            gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.bits_per_sample.as_deref()), set_halign: gtk::Align::End },
+                        },
+                        gtk::Box {
+                            set_spacing: 8,
+                            gtk::Label { set_label: "文件大小", set_hexpand: true, set_halign: gtk::Align::Start },
+                            gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.file_size.as_deref()), set_halign: gtk::Align::End },
+                        },
+                        #[name = "cover_frame"]
+                        adw::Clamp {
+                            set_maximum_size: 260,
+                            set_tightening_threshold: 260,
+                            set_halign: gtk::Align::Center,
+                            #[wrap(Some)]
+                            set_child = &gtk::Frame {
+                                #[name = "cover"]
+                                gtk::Picture {
+                                    set_width_request: 260,
+                                    set_height_request: 260,
+                                    set_can_shrink: true,
+                                },
+                            },
+                        },
+                        #[name = "cover_dimensions"]
+                        gtk::Label {
+                            set_halign: gtk::Align::Center,
+                            add_css_class: "dim-label",
+                        },
+                        gtk::Label {
+                            #[watch]
+                            set_label: model.cover_hint(),
+                            set_wrap: true,
+                            set_justify: gtk::Justification::Center,
+                        },
+                        gtk::Box {
+                            set_spacing: 8,
+                            set_halign: gtk::Align::Center,
+                            gtk::Button { set_label: "选择图片", connect_clicked => AppMsg::ChooseCover },
+                            gtk::Button { set_label: "移除", connect_clicked => AppMsg::RemoveCover },
+                        },
+                        },
                     },
-                    gtk::Box {
-                        set_spacing: 8,
-                        set_halign: gtk::Align::Center,
-                        gtk::Button { set_label: "选择图片", connect_clicked => AppMsg::ChooseCover },
-                        gtk::Button { set_label: "移除", connect_clicked => AppMsg::RemoveCover },
-                    },
-                    },
-                },
                 },
                 add_overlay = &gtk::Label {
                     set_label: "请先从顶部工具栏打开一个音乐文件夹",
@@ -501,6 +521,7 @@ impl Component for AppModel {
                     #[watch]
                     set_visible: model.root_directory.is_none(),
                 },
+
             },
         }
     }
@@ -545,7 +566,8 @@ impl Component for AppModel {
         let rendered_draft_revision = Cell::new(u64::MAX);
 
         if let Some(display) = gdk::Display::default() {
-            gtk::IconTheme::for_display(&display).add_resource_path("/com/anson/sleeve/icons");
+            gtk::IconTheme::for_display(&display)
+                .add_resource_path("/com/github/anson2251/sleeve/icons");
         }
 
         let header_bar = gtk::HeaderBar::new();
@@ -553,25 +575,32 @@ impl Component for AppModel {
         #[cfg(target_os = "macos")]
         header_bar.set_property("use-native-controls", true);
 
-        let open_directory = gtk::Button::with_label("打开目录");
-        let open_sender = sender.clone();
-        open_directory.connect_clicked(move |_| open_sender.input(AppMsg::ChooseDirectory));
-        header_bar.pack_start(&open_directory);
-
-        let sidebar_button = gtk::Button::builder()
+        let sidebar_button = gtk::ToggleButton::builder()
             .icon_name("sidebar-show-symbolic")
             .tooltip_text("显示或隐藏文件列表")
             .build();
         let sidebar_sender = sender.clone();
-        sidebar_button.connect_clicked(move |_| sidebar_sender.input(AppMsg::ToggleSidebar));
+        sidebar_button.connect_toggled(move |button| {
+            sidebar_sender.input(AppMsg::SetSidebarVisible(button.is_active()))
+        });
         header_bar.pack_start(&sidebar_button);
 
-        let inspector_button = gtk::Button::builder()
+        let open_directory = gtk::Button::builder()
+            .icon_name("folder-open-symbolic")
+            .tooltip_text("打开目录")
+            .build();
+        let open_sender = sender.clone();
+        open_directory.connect_clicked(move |_| open_sender.input(AppMsg::ChooseDirectory));
+        header_bar.pack_start(&open_directory);
+
+        let inspector_button = gtk::ToggleButton::builder()
             .icon_name("dialog-information-symbolic")
             .tooltip_text("显示或隐藏元信息与封面")
             .build();
         let inspector_sender = sender.clone();
-        inspector_button.connect_clicked(move |_| inspector_sender.input(AppMsg::ToggleInspector));
+        inspector_button.connect_toggled(move |button| {
+            inspector_sender.input(AppMsg::SetInspectorVisible(button.is_active()))
+        });
         header_bar.pack_end(&inspector_button);
 
         let style_provider = gtk::CssProvider::new();
@@ -580,6 +609,7 @@ impl Component for AppModel {
              .file-tree-row:hover { background: alpha(@theme_fg_color, 0.06); }\
              .file-tree-row.selected { background: alpha(@accent_bg_color, 0.22); color: @accent_fg_color; }\
              .file-tree-row:focus { box-shadow: none; outline: none; }\
+             .regular-file { font-weight: normal; }\
              .tree-thumbnail, .album-thumbnail { min-width: 24px; min-height: 24px; max-width: 24px; max-height: 24px; border-radius: 4px;}",
         );
         if let Some(display) = gdk::Display::default() {
@@ -590,7 +620,10 @@ impl Component for AppModel {
             );
         }
 
-        let restore_button = gtk::Button::with_label("恢复备份");
+        let restore_button = gtk::Button::builder()
+            .icon_name("document-revert-symbolic")
+            .tooltip_text("恢复备份")
+            .build();
         restore_button.set_sensitive(false);
         let restore_popover = gtk::Popover::new();
         let backup_list = gtk::Box::builder()
@@ -608,7 +641,7 @@ impl Component for AppModel {
         header_bar.pack_end(&restore_button);
 
         let status_label = gtk::Label::builder()
-            .label(&model.status)
+            .label(model.header_title())
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .build();
         header_bar.set_title_widget(Some(&status_label));
@@ -660,8 +693,10 @@ impl Component for AppModel {
                     CmdMsg::AudioLoaded(Box::new(read_audio_file(path, root_path)))
                 });
             }
-            AppMsg::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
-            AppMsg::ToggleInspector => self.inspector_visible = !self.inspector_visible,
+            AppMsg::SetSidebarVisible(visible) => self.sidebar_visible = visible,
+            AppMsg::SetInspectorVisible(visible) => {
+                self.inspector_visible = visible && self.selected_file.is_some();
+            }
             AppMsg::TreeRow(output) => match output {
                 ui::tree_row::TreeRowOutput::ToggleDirectory(path) => self.toggle_directory(&path),
                 ui::tree_row::TreeRowOutput::SelectAudioFile(path) => {
@@ -780,9 +815,11 @@ impl Component for AppModel {
     }
 
     fn post_view() {
-        status_label.set_label(&model.status);
+        status_label.set_label(&model.header_title());
         sidebar_button.set_sensitive(model.root_directory.is_some());
-        inspector_button.set_sensitive(model.root_directory.is_some());
+        sidebar_button.set_active(model.sidebar_visible);
+        inspector_button.set_sensitive(model.selected_file.is_some());
+        inspector_button.set_active(model.inspector_visible);
 
         if rendered_cover_revision.replace(model.cover_revision) != model.cover_revision {
             cover_dimensions.set_label(&update_cover(cover, &model.active_draft.cover));
@@ -823,9 +860,6 @@ fn configure_macos_window(window: &gtk::Window) {
     });
 }
 
-#[cfg(not(target_os = "macos"))]
-fn configure_macos_window(_window: &gtk::Window) {}
-
 #[cfg(target_os = "macos")]
 fn configure_macos_window_style() {
     let provider = gtk::CssProvider::new();
@@ -840,9 +874,6 @@ fn configure_macos_window_style() {
         );
     }
 }
-
-#[cfg(not(target_os = "macos"))]
-fn configure_macos_window_style() {}
 
 fn choose_directory(root: &gtk::Window, sender: ComponentSender<AppModel>) {
     let chooser = gtk::FileChooserNative::new(
