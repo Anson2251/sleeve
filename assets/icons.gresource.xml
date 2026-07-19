@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/com/anson/sleeve/icons/scalable/actions/">
+    <file preprocess="xml-stripblanks" alias="album-outlined-symbolic.svg">icons/album-outlined-symbolic.svg</file>
+  </gresource>
+</gresources>

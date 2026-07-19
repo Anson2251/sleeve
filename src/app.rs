@@ -1,12 +1,18 @@
-use std::{cell::Cell, collections::HashMap, path::PathBuf, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    path::PathBuf,
+    rc::Rc,
+};
 
 use relm4::{
-    Component, ComponentParts, ComponentSender, RelmWidgetExt,
+    Component, ComponentParts, ComponentSender, RelmWidgetExt, adw,
+    factory::FactoryVecDeque,
     gtk::{self, gdk, gio, prelude::*},
 };
 
 use crate::{
-    models::{AudioFile, BackupVersion, CoverDraft, FileTreeNode, TagDraft, TagField, TreeRow},
+    models::{AudioFile, BackupVersion, CoverDraft, FileTreeNode, TagDraft, TagField},
     services::{
         create_backup, list_backups, read_audio_file, restore_backup, scan_directory, write_draft,
     },
@@ -18,12 +24,17 @@ pub struct AppModel {
     tree: Option<FileTreeNode>,
     expanded_paths: Vec<PathBuf>,
     selected_file: Option<AudioFile>,
+    selected_path: Option<PathBuf>,
+    sidebar_visible: bool,
+    inspector_visible: bool,
     original_draft: Option<TagDraft>,
     active_draft: TagDraft,
     saved_drafts: HashMap<PathBuf, TagDraft>,
     status: String,
     cover_error: Option<String>,
     tree_revision: u64,
+    tree_rows: FactoryVecDeque<ui::tree_row::TreeRowComponent>,
+    album_cover_textures: Rc<RefCell<HashMap<(PathBuf, i32), gdk::Texture>>>,
     cover_revision: u64,
     backups: Vec<BackupVersion>,
     backup_revision: u64,
@@ -34,8 +45,10 @@ pub struct AppModel {
 pub enum AppMsg {
     ChooseDirectory,
     DirectoryChosen(PathBuf),
-    ToggleDirectory(PathBuf),
+
     SelectAudioFile(PathBuf),
+    ToggleSidebar,
+    ToggleInspector,
     SetField(TagField, String),
     Save,
     RestoreDraft,
@@ -43,6 +56,7 @@ pub enum AppMsg {
     CoverChosen(PathBuf),
     RemoveCover,
     RestoreBackup(PathBuf),
+    TreeRow(ui::tree_row::TreeRowOutput),
 }
 
 #[derive(Debug)]
@@ -77,7 +91,7 @@ impl AppModel {
             .unwrap_or_else(|| "—".into())
     }
 
-    fn codec(&self) -> String {
+    fn encoder(&self) -> String {
         self.selected_file
             .as_ref()
             .map(|file| file.metadata.codec.clone())
@@ -99,6 +113,7 @@ impl AppModel {
 
     fn clear_selection(&mut self) {
         self.selected_file = None;
+        self.set_selected_path(None);
         self.original_draft = None;
         self.active_draft = TagDraft::default();
         self.cover_error = None;
@@ -122,10 +137,97 @@ impl AppModel {
         } else {
             status.into()
         };
+        self.set_selected_path(Some(file.path.clone()));
         self.selected_file = Some(file);
         self.cover_error = None;
         self.cover_revision = self.cover_revision.wrapping_add(1);
         self.draft_revision = self.draft_revision.wrapping_add(1);
+    }
+
+    fn sync_tree_rows(&mut self) {
+        let rows = self
+            .tree
+            .as_ref()
+            .map(|tree| tree.flatten(&self.expanded_paths))
+            .unwrap_or_default();
+        let selected_path = self.selected_path.as_deref();
+        let mut tree_rows = self.tree_rows.guard();
+        tree_rows.clear();
+        for row in rows {
+            let selected = !row.is_directory && selected_path == Some(row.path.as_path());
+            tree_rows.push_back(ui::tree_row::TreeRowInit {
+                row,
+                selected,
+                textures: self.album_cover_textures.clone(),
+            });
+        }
+    }
+
+    fn toggle_directory(&mut self, path: &std::path::Path) {
+        let Some(tree) = self.tree.as_ref() else {
+            return;
+        };
+        let old_rows = tree.flatten(&self.expanded_paths);
+        let Some(index) = old_rows.iter().position(|row| row.path == path) else {
+            return;
+        };
+        let depth = old_rows[index].depth;
+        let old_descendant_count = old_rows[index + 1..]
+            .iter()
+            .take_while(|row| row.depth > depth)
+            .count();
+
+        if let Some(expanded_index) = self.expanded_paths.iter().position(|item| item == path) {
+            self.expanded_paths.remove(expanded_index);
+        } else {
+            self.expanded_paths.push(path.to_owned());
+        }
+
+        let new_rows = tree.flatten(&self.expanded_paths);
+        let new_descendants = new_rows[index + 1..]
+            .iter()
+            .take_while(|row| row.depth > depth)
+            .cloned()
+            .collect::<Vec<_>>();
+        let selected_path = self.selected_path.as_deref();
+        let mut tree_rows = self.tree_rows.guard();
+        if let Some(row) = tree_rows.get_mut(index) {
+            row.set_expanded(new_rows[index].expanded);
+        }
+        for _ in 0..old_descendant_count {
+            tree_rows.remove(index + 1);
+        }
+        for (offset, row) in new_descendants.into_iter().enumerate() {
+            let selected = !row.is_directory && selected_path == Some(row.path.as_path());
+            tree_rows.insert(
+                index + 1 + offset,
+                ui::tree_row::TreeRowInit {
+                    row,
+                    selected,
+                    textures: self.album_cover_textures.clone(),
+                },
+            );
+        }
+    }
+
+    fn set_selected_path(&mut self, path: Option<PathBuf>) {
+        let previous = std::mem::replace(&mut self.selected_path, path.clone());
+        let changed_rows = self
+            .tree_rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let is_selected = path.as_deref() == Some(row.path());
+                let was_selected = previous.as_deref() == Some(row.path());
+                (is_selected != was_selected).then_some((index, is_selected))
+            })
+            .collect::<Vec<_>>();
+        let mut tree_rows = self.tree_rows.guard();
+        for (index, is_selected) in changed_rows {
+            if let Some(row) = tree_rows.get_mut(index) {
+                row.set_selected(is_selected);
+            }
+        }
     }
 
     fn refresh_backups(&self, sender: ComponentSender<Self>) {
@@ -146,10 +248,11 @@ impl Component for AppModel {
     type CommandOutput = CmdMsg;
 
     additional_fields! {
-        rendered_tree_revision: Cell<u64>,
         rendered_cover_revision: Cell<u64>,
         rendered_backup_revision: Cell<u64>,
         rendered_draft_revision: Cell<u64>,
+        sidebar_button: gtk::Button,
+        inspector_button: gtk::Button,
         syncing: Rc<Cell<bool>>,
         status_label: gtk::Label,
         restore_popover: gtk::Popover,
@@ -168,12 +271,16 @@ impl Component for AppModel {
             gtk::Overlay {
                 #[name = "content"]
                 #[wrap(Some)]
-                set_child = &gtk::Box {
-                    set_orientation: gtk::Orientation::Horizontal,
+                set_child = &adw::OverlaySplitView {
                     #[watch]
                     set_visible: model.root_directory.is_some(),
-
-                gtk::Box {
+                    #[watch]
+                    set_show_sidebar: model.sidebar_visible,
+                    set_sidebar_width_fraction: 0.24,
+                    set_min_sidebar_width: 240.0,
+                    set_max_sidebar_width: 360.0,
+                    #[wrap(Some)]
+                    set_sidebar = &gtk::Box {
                     set_orientation: gtk::Orientation::Vertical,
                     set_spacing: 12,
                     set_width_request: 290,
@@ -185,14 +292,24 @@ impl Component for AppModel {
                     },
                     gtk::ScrolledWindow {
                         set_vexpand: true,
-                        #[name = "file_tree"]
-                        gtk::Box {
+                        #[local_ref]
+                        tree_box -> gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
                             set_spacing: 2,
                         },
                     },
-                },
-                gtk::Separator { set_orientation: gtk::Orientation::Vertical },
+                    },
+                    #[wrap(Some)]
+                    set_content = &adw::OverlaySplitView {
+                        set_sidebar_position: gtk::PackType::End,
+                        #[watch]
+                        set_show_sidebar: model.inspector_visible,
+                        set_sidebar_width_fraction: 0.28,
+                        set_min_sidebar_width: 280.0,
+                        set_max_sidebar_width: 420.0,
+                        #[wrap(Some)]
+                        set_content = &gtk::Box {
+                            set_orientation: gtk::Orientation::Horizontal,
 
                 #[name = "editor"]
                 gtk::Box {
@@ -291,14 +408,15 @@ impl Component for AppModel {
                         gtk::Button { set_label: "保存", connect_clicked => AppMsg::Save },
                     },
                 },
-                gtk::Separator { set_orientation: gtk::Orientation::Vertical },
-
-                gtk::Box {
+                        },
+                        #[wrap(Some)]
+                        set_sidebar = &gtk::Box {
                     set_orientation: gtk::Orientation::Vertical,
                     set_spacing: 12,
                     set_width_request: 310,
-                    set_hexpand: false,
                     set_margin_all: 16,
+                    #[watch]
+                    set_sensitive: model.selected_file.is_some(),
                     gtk::Label { set_label: "元信息与封面", set_halign: gtk::Align::Start, add_css_class: "title-4" },
                     gtk::Box {
                         set_spacing: 8,
@@ -307,8 +425,8 @@ impl Component for AppModel {
                     },
                     gtk::Box {
                         set_spacing: 8,
-                        gtk::Label { set_label: "音频编码", set_hexpand: true, set_halign: gtk::Align::Start },
-                        gtk::Label { #[watch] set_label: &model.codec(), set_halign: gtk::Align::End },
+                        gtk::Label { set_label: "编码器", set_hexpand: true, set_halign: gtk::Align::Start },
+                        gtk::Label { #[watch] set_label: &model.encoder(), set_halign: gtk::Align::End },
                     },
                     gtk::Box {
                         set_spacing: 8,
@@ -341,12 +459,18 @@ impl Component for AppModel {
                         gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.file_size.as_deref()), set_halign: gtk::Align::End },
                     },
                     #[name = "cover_frame"]
-                    gtk::Frame {
-                        #[name = "cover"]
-                        gtk::Picture {
-                            set_width_request: 260,
-                            set_height_request: 260,
-                            set_can_shrink: true,
+                    adw::Clamp {
+                        set_maximum_size: 260,
+                        set_tightening_threshold: 260,
+                        set_halign: gtk::Align::Center,
+                        #[wrap(Some)]
+                        set_child = &gtk::Frame {
+                            #[name = "cover"]
+                            gtk::Picture {
+                                set_width_request: 260,
+                                set_height_request: 260,
+                                set_can_shrink: true,
+                            },
                         },
                     },
                     #[name = "cover_dimensions"]
@@ -365,6 +489,7 @@ impl Component for AppModel {
                         set_halign: gtk::Align::Center,
                         gtk::Button { set_label: "选择图片", connect_clicked => AppMsg::ChooseCover },
                         gtk::Button { set_label: "移除", connect_clicked => AppMsg::RemoveCover },
+                    },
                     },
                 },
                 },
@@ -385,27 +510,43 @@ impl Component for AppModel {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
+        let album_cover_textures = Rc::new(RefCell::new(HashMap::new()));
         let model = Self {
             root_directory: None,
             tree: None,
             expanded_paths: Vec::new(),
             selected_file: None,
+            selected_path: None,
+            sidebar_visible: false,
+            inspector_visible: false,
             original_draft: None,
             active_draft: TagDraft::default(),
             saved_drafts: HashMap::new(),
             status: "选择一个音乐目录以开始浏览。".into(),
             cover_error: None,
             tree_revision: 0,
+            tree_rows: FactoryVecDeque::builder()
+                .launch(
+                    gtk::Box::builder()
+                        .orientation(gtk::Orientation::Vertical)
+                        .spacing(2)
+                        .build(),
+                )
+                .forward(sender.input_sender(), AppMsg::TreeRow),
+            album_cover_textures: album_cover_textures.clone(),
             cover_revision: 0,
             backups: Vec::new(),
             backup_revision: 0,
             draft_revision: 0,
         };
         let syncing = Rc::new(Cell::new(false));
-        let rendered_tree_revision = Cell::new(u64::MAX);
         let rendered_cover_revision = Cell::new(u64::MAX);
         let rendered_backup_revision = Cell::new(u64::MAX);
         let rendered_draft_revision = Cell::new(u64::MAX);
+
+        if let Some(display) = gdk::Display::default() {
+            gtk::IconTheme::for_display(&display).add_resource_path("/com/anson/sleeve/icons");
+        }
 
         let header_bar = gtk::HeaderBar::new();
         header_bar.set_show_title_buttons(true);
@@ -416,6 +557,38 @@ impl Component for AppModel {
         let open_sender = sender.clone();
         open_directory.connect_clicked(move |_| open_sender.input(AppMsg::ChooseDirectory));
         header_bar.pack_start(&open_directory);
+
+        let sidebar_button = gtk::Button::builder()
+            .icon_name("sidebar-show-symbolic")
+            .tooltip_text("显示或隐藏文件列表")
+            .build();
+        let sidebar_sender = sender.clone();
+        sidebar_button.connect_clicked(move |_| sidebar_sender.input(AppMsg::ToggleSidebar));
+        header_bar.pack_start(&sidebar_button);
+
+        let inspector_button = gtk::Button::builder()
+            .icon_name("dialog-information-symbolic")
+            .tooltip_text("显示或隐藏元信息与封面")
+            .build();
+        let inspector_sender = sender.clone();
+        inspector_button.connect_clicked(move |_| inspector_sender.input(AppMsg::ToggleInspector));
+        header_bar.pack_end(&inspector_button);
+
+        let style_provider = gtk::CssProvider::new();
+        style_provider.load_from_data(
+            ".file-tree-row { min-height: 34px; padding: 0 8px; border: none; border-radius: 6px; box-shadow: none; background: transparent; }\
+             .file-tree-row:hover { background: alpha(@theme_fg_color, 0.06); }\
+             .file-tree-row.selected { background: alpha(@accent_bg_color, 0.22); color: @accent_fg_color; }\
+             .file-tree-row:focus { box-shadow: none; outline: none; }\
+             .tree-thumbnail, .album-thumbnail { min-width: 24px; min-height: 24px; max-width: 24px; max-height: 24px; border-radius: 4px;}",
+        );
+        if let Some(display) = gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &style_provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
 
         let restore_button = gtk::Button::with_label("恢复备份");
         restore_button.set_sensitive(false);
@@ -441,9 +614,11 @@ impl Component for AppModel {
         header_bar.set_title_widget(Some(&status_label));
         root.set_titlebar(Some(&header_bar));
 
+        let tree_box = model.tree_rows.widget();
         let widgets = view_output!();
 
         configure_macos_window(&root);
+        configure_macos_window_style();
 
         let drop_target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
         let drop_sender = sender.clone();
@@ -463,6 +638,7 @@ impl Component for AppModel {
         match msg {
             AppMsg::ChooseDirectory => choose_directory(root, sender),
             AppMsg::DirectoryChosen(path) => {
+                self.sidebar_visible = true;
                 self.status = format!("正在扫描 {}…", path.display());
                 self.root_directory = Some(path.clone());
                 self.tree = None;
@@ -473,15 +649,9 @@ impl Component for AppModel {
                     CmdMsg::DirectoryScanned(scan_directory(path.clone()), path)
                 });
             }
-            AppMsg::ToggleDirectory(path) => {
-                if let Some(index) = self.expanded_paths.iter().position(|item| item == &path) {
-                    self.expanded_paths.remove(index);
-                } else {
-                    self.expanded_paths.push(path);
-                }
-                self.tree_revision = self.tree_revision.wrapping_add(1);
-            }
+
             AppMsg::SelectAudioFile(path) => {
+                self.set_selected_path(Some(path.clone()));
                 let Some(root_path) = self.root_directory.clone() else {
                     return;
                 };
@@ -490,6 +660,14 @@ impl Component for AppModel {
                     CmdMsg::AudioLoaded(Box::new(read_audio_file(path, root_path)))
                 });
             }
+            AppMsg::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
+            AppMsg::ToggleInspector => self.inspector_visible = !self.inspector_visible,
+            AppMsg::TreeRow(output) => match output {
+                ui::tree_row::TreeRowOutput::ToggleDirectory(path) => self.toggle_directory(&path),
+                ui::tree_row::TreeRowOutput::SelectAudioFile(path) => {
+                    sender.input(AppMsg::SelectAudioFile(path))
+                }
+            },
             AppMsg::SetField(field, value) => self.active_draft.set(field, value),
             AppMsg::Save => {
                 if !self.active_draft.is_valid() {
@@ -556,9 +734,12 @@ impl Component for AppModel {
         match msg {
             CmdMsg::DirectoryScanned(result, path) => match result {
                 Ok(Some(tree)) => {
-                    self.expanded_paths = vec![path];
+                    self.expanded_paths = tree.album_directory_paths();
+                    if !self.expanded_paths.iter().any(|expanded| expanded == &path) {
+                        self.expanded_paths.push(path);
+                    }
                     self.tree = Some(tree);
-                    self.tree_revision = self.tree_revision.wrapping_add(1);
+                    self.sync_tree_rows();
                     self.status = "目录扫描完成。选择一个音频文件以编辑其内存草稿。".into();
                 }
                 Ok(None) => self.status = "该目录及其子目录中没有受支持的音频文件。".into(),
@@ -600,14 +781,9 @@ impl Component for AppModel {
 
     fn post_view() {
         status_label.set_label(&model.status);
-        if rendered_tree_revision.replace(model.tree_revision) != model.tree_revision {
-            refresh_tree(
-                file_tree,
-                model.tree.as_ref(),
-                &model.expanded_paths,
-                sender.clone(),
-            );
-        }
+        sidebar_button.set_sensitive(model.root_directory.is_some());
+        inspector_button.set_sensitive(model.root_directory.is_some());
+
         if rendered_cover_revision.replace(model.cover_revision) != model.cover_revision {
             cover_dimensions.set_label(&update_cover(cover, &model.active_draft.cover));
         }
@@ -649,6 +825,24 @@ fn configure_macos_window(window: &gtk::Window) {
 
 #[cfg(not(target_os = "macos"))]
 fn configure_macos_window(_window: &gtk::Window) {}
+
+#[cfg(target_os = "macos")]
+fn configure_macos_window_style() {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_data(
+        "window, .background, .titlebar, headerbar, .window-frame { border-radius: 0px; }",
+    );
+    if let Some(display) = gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_macos_window_style() {}
 
 fn choose_directory(root: &gtk::Window, sender: ComponentSender<AppModel>) {
     let chooser = gtk::FileChooserNative::new(
@@ -710,49 +904,6 @@ fn refresh_backup_list(
         let restore_sender = sender.clone();
         button.connect_clicked(move |_| {
             restore_sender.input(AppMsg::RestoreBackup(backup_path.clone()))
-        });
-        container.append(&button);
-    }
-}
-
-fn refresh_tree(
-    container: &gtk::Box,
-    tree: Option<&FileTreeNode>,
-    expanded: &[PathBuf],
-    sender: ComponentSender<AppModel>,
-) {
-    ui::file_tree::clear(container);
-    let Some(tree) = tree else {
-        return;
-    };
-    for TreeRow {
-        name,
-        path,
-        depth,
-        is_directory,
-        expanded,
-    } in tree.flatten(expanded)
-    {
-        let prefix = if is_directory {
-            if expanded { "▾" } else { "▸" }
-        } else {
-            "♪"
-        };
-        let button = gtk::Button::builder().halign(gtk::Align::Fill).build();
-        button.set_child(Some(
-            &gtk::Label::builder()
-                .label(format!("{}{}  {}", "  ".repeat(depth), prefix, name))
-                .halign(gtk::Align::Start)
-                .ellipsize(gtk::pango::EllipsizeMode::End)
-                .build(),
-        ));
-        let row_sender = sender.clone();
-        button.connect_clicked(move |_| {
-            if is_directory {
-                row_sender.input(AppMsg::ToggleDirectory(path.clone()));
-            } else {
-                row_sender.input(AppMsg::SelectAudioFile(path.clone()));
-            }
         });
         container.append(&button);
     }

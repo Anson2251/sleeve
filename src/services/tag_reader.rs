@@ -6,8 +6,10 @@ use std::{
 use audiotags::Tag;
 use symphonia::{
     core::{
-        codecs::CODEC_TYPE_NULL, formats::FormatOptions, io::MediaSourceStream,
-        meta::MetadataOptions, probe::Hint,
+        formats::FormatOptions,
+        io::MediaSourceStream,
+        meta::{MetadataOptions, StandardTagKey, Tag as MetadataTag},
+        probe::Hint,
     },
     default::get_probe,
 };
@@ -58,16 +60,45 @@ fn inspect_media(path: &Path, size: u64) -> AudioMetadata {
         Ok(probe) => probe,
         Err(_) => return fallback_metadata(path, size),
     };
-    let format = probe.format;
+    let mut probe_metadata = probe.metadata;
+    let mut format = probe.format;
+    let (probe_encoder, probe_settings) = match probe_metadata.get() {
+        Some(metadata) => match metadata.current() {
+            Some(metadata) => (
+                encoder_from_tags(metadata.tags(), StandardTagKey::Encoder),
+                encoder_from_tags(metadata.tags(), StandardTagKey::EncoderSettings),
+            ),
+            None => (None, None),
+        },
+        None => (None, None),
+    };
+    let format_encoder = format
+        .metadata()
+        .current()
+        .and_then(|metadata| encoder_from_tags(metadata.tags(), StandardTagKey::Encoder));
+    let format_settings = format
+        .metadata()
+        .current()
+        .and_then(|metadata| encoder_from_tags(metadata.tags(), StandardTagKey::EncoderSettings));
+    let encoder = select_encoder(
+        probe_encoder,
+        format_encoder,
+        probe_settings,
+        format_settings,
+    );
     let track = match format.default_track().or_else(|| format.tracks().first()) {
         Some(track) => track,
         None => return fallback_metadata(path, size),
     };
     let parameters = &track.codec_params;
     let sample_rate = parameters.sample_rate.map(|value| format!("{value} Hz"));
-    let channels = parameters
-        .channels
-        .map(|value| format_channels(value.count()));
+    let channels = parameters.channels.map(|value| value.count()).or_else(|| {
+        is_m4a(path)
+            .then(|| fs::read(path).ok())
+            .flatten()
+            .and_then(|bytes| m4a_channels(&bytes))
+    });
+    let channels = channels.map(format_channels);
     let bits_per_sample = parameters
         .bits_per_sample
         .map(|value| format!("{value}-bit"));
@@ -92,11 +123,7 @@ fn inspect_media(path: &Path, size: u64) -> AudioMetadata {
 
     AudioMetadata {
         container: container_name(path),
-        codec: if parameters.codec == CODEC_TYPE_NULL {
-            "未知".into()
-        } else {
-            format!("{:?}", parameters.codec)
-        },
+        codec: encoder.unwrap_or_default(),
         duration,
         bitrate,
         sample_rate,
@@ -104,6 +131,74 @@ fn inspect_media(path: &Path, size: u64) -> AudioMetadata {
         bits_per_sample,
         file_size: Some(format_file_size(size)),
     }
+}
+
+fn is_m4a(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("m4a" | "mp4")
+    )
+}
+
+fn m4a_channels(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(8).enumerate().find_map(|(offset, header)| {
+        if header[4..] != *b"stsd" {
+            return None;
+        }
+
+        let size = usize::try_from(u32::from_be_bytes(header[..4].try_into().ok()?)).ok()?;
+        bytes
+            .get(offset + 16..offset + size)
+            .and_then(m4a_sample_entry_channels)
+    })
+}
+
+fn m4a_sample_entry_channels(entry: &[u8]) -> Option<usize> {
+    entry
+        .get(24..26)
+        .and_then(|channels| channels.try_into().ok())
+        .map(u16::from_be_bytes)
+        .filter(|&channels| channels > 0)
+        .map(usize::from)
+}
+
+fn select_encoder(
+    probe_encoder: Option<String>,
+    format_encoder: Option<String>,
+    probe_settings: Option<String>,
+    format_settings: Option<String>,
+) -> Option<String> {
+    probe_encoder
+        .or(format_encoder)
+        .or(probe_settings)
+        .or(format_settings)
+}
+
+#[cfg(test)]
+fn encoder_from_metadata_sources<'a>(
+    sources: impl IntoIterator<Item = Option<&'a [MetadataTag]>>,
+) -> Option<String> {
+    let mut sources = sources.into_iter().flatten().map(|tags| {
+        (
+            encoder_from_tags(tags, StandardTagKey::Encoder),
+            encoder_from_tags(tags, StandardTagKey::EncoderSettings),
+        )
+    });
+    let (first_encoder, first_settings) = sources.next().unwrap_or_default();
+    let (second_encoder, second_settings) = sources.next().unwrap_or_default();
+
+    select_encoder(
+        first_encoder,
+        second_encoder,
+        first_settings,
+        second_settings,
+    )
+}
+
+fn encoder_from_tags(tags: &[MetadataTag], key: StandardTagKey) -> Option<String> {
+    tags.iter()
+        .find(|tag| tag.std_key == Some(key))
+        .map(|tag| tag.value.to_string())
 }
 
 fn fallback_metadata(path: &Path, size: u64) -> AudioMetadata {
@@ -153,5 +248,77 @@ mod tests {
         assert_eq!(format_duration(61.2), "1:01");
         assert_eq!(format_file_size(1024), "1.0 KB");
         assert_eq!(format_channels(2), "立体声 (2)");
+    }
+
+    #[test]
+    fn extracts_encoder_tag() {
+        let tags = [MetadataTag::new(
+            Some(StandardTagKey::Encoder),
+            "ENCODER",
+            "Lavf57.71.100".into(),
+        )];
+
+        assert_eq!(
+            encoder_from_metadata_sources([Some(&tags[..])]),
+            Some("Lavf57.71.100".into())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_encoder_settings_tag() {
+        let tags = [MetadataTag::new(
+            Some(StandardTagKey::EncoderSettings),
+            "ENCODER SETTINGS",
+            "-compression_level 8".into(),
+        )];
+
+        assert_eq!(
+            encoder_from_metadata_sources([Some(&tags[..])]),
+            Some("-compression_level 8".into())
+        );
+    }
+
+    #[test]
+    fn prefers_probe_metadata_over_format_metadata() {
+        let probe_tags = [MetadataTag::new(
+            Some(StandardTagKey::Encoder),
+            "TSSE",
+            "Lavf58.76.100".into(),
+        )];
+        let format_tags = [MetadataTag::new(
+            Some(StandardTagKey::EncoderSettings),
+            "ENCODER SETTINGS",
+            "-compression_level 8".into(),
+        )];
+
+        assert_eq!(
+            encoder_from_metadata_sources([Some(&probe_tags[..]), Some(&format_tags[..])]),
+            Some("Lavf58.76.100".into())
+        );
+    }
+
+    #[test]
+    fn reads_m4a_channel_count_from_audio_sample_entry() {
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&36u32.to_be_bytes());
+        entry.extend_from_slice(b"mp4a");
+        entry.extend_from_slice(&[0; 6]);
+        entry.extend_from_slice(&1u16.to_be_bytes());
+        entry.extend_from_slice(&[0; 8]);
+        entry.extend_from_slice(&2u16.to_be_bytes());
+        entry.extend_from_slice(&16u16.to_be_bytes());
+        entry.extend_from_slice(&[0; 4]);
+        entry.extend_from_slice(&(44_100u32 << 16).to_be_bytes());
+
+        assert_eq!(m4a_sample_entry_channels(&entry), Some(2));
+
+        let mut stsd = Vec::new();
+        stsd.extend_from_slice(&52u32.to_be_bytes());
+        stsd.extend_from_slice(b"stsd");
+        stsd.extend_from_slice(&[0; 4]);
+        stsd.extend_from_slice(&1u32.to_be_bytes());
+        stsd.extend_from_slice(&entry);
+
+        assert_eq!(m4a_channels(&stsd), Some(2));
     }
 }
