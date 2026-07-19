@@ -9,24 +9,19 @@
 - 编辑标题、艺人、专辑、专辑艺人、年份、曲目号、碟号和流派。
 - 读取并显示容器格式、编码、时长、码率、采样率、声道、位深及文件大小。
 - 预览、替换或移除封面；支持拖放图片。
-- 保存前自动创建版本化备份。
-- 从 HeaderBar 右侧的“恢复备份”菜单还原历史版本。
+- 编辑停止 500ms 后自动保存有效标签与封面修改。
+- 以当前文件为范围的撤销/重做：macOS 使用 `⌘Z` / `⇧⌘Z`，Linux 使用 `Ctrl+Z` / `Ctrl+Shift+Z`。
+- macOS 原生菜单栏，包含打开目录、撤销/重做、侧栏切换、About 和退出操作。
 
-## 安全保存与恢复
+## 自动保存与撤销历史
 
-每次保存或恢复前，Sleeve 会先在所选目录中创建隐藏备份：
+Sleeve 会在每次自动保存前为当前音频文件创建临时快照，用于当前应用会话内的撤销/重做：
 
 ```text
 <音乐目录>/.sleeve-backups/<时间戳>/<原始相对路径>
 ```
 
-例如：
-
-```text
-Music/.sleeve-backups/2026-07-18T14-32-08/Album/01 - Track.flac
-```
-
-恢复操作同样会先备份当前文件，因此恢复本身也可以再次撤销。
+快照只在本次会话中使用；正常退出时，Sleeve 会先保存待写入的修改，再删除整个 `.sleeve-backups` 目录。撤销历史不会跨应用启动保留。
 
 ## 支持格式
 
@@ -36,9 +31,9 @@ Music/.sleeve-backups/2026-07-18T14-32-08/Album/01 - Track.flac
 - FLAC
 - M4A / M4B / MP4
 
-## 运行
+## 从源码运行
 
-需要安装 GTK4 开发环境。
+从源码构建需要安装 GTK4 和 libadwaita 开发环境。
 
 ### macOS
 
@@ -49,12 +44,31 @@ cargo run
 
 macOS 下 HeaderBar 使用原生窗口控制，并通过原生 `NSWindow` 配置禁用全屏行为，同时保留窗口缩放/最大化能力。
 
+### macOS 打包
+
+需要额外安装 `dylibbundler`：
+
+```sh
+brew install dylibbundler
+./scripts/bundle-macos.sh --dmg
+```
+
+产物会生成在 `dist/`。打包脚本会将 GTK4、libadwaita 及所需运行时资源放入 `.app`，因此使用生成的 `.app` 或 DMG **不需要**预先安装 GTK4 或 libadwaita。
+
 ### Linux（Debian/Ubuntu）
 
 ```sh
 sudo apt install libgtk-4-dev libadwaita-1-dev
 cargo run
 ```
+
+## Alpha 状态
+
+Sleeve 目前处于 Alpha 阶段。重要音频文件请先保留独立备份，并在副本上验证写入结果。
+
+## 许可证
+
+Sleeve 使用 [GNU General Public License v3.0 或更高版本](LICENSE) 发布。
 
 ## 开发检查
 
