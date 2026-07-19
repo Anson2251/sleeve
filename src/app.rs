@@ -6,10 +6,11 @@ use std::{
     time::Duration,
 };
 
+use relm4::adw::prelude::*;
 use relm4::{
     Component, ComponentParts, ComponentSender, RelmWidgetExt, adw,
     factory::FactoryVecDeque,
-    gtk::{self, gdk, gio, prelude::*},
+    gtk::{self, gdk, gio},
 };
 
 use crate::{
@@ -911,14 +912,19 @@ impl Component for AppModel {
                 }
             }
             AppMsg::ShowAbout => {
-                gtk::AboutDialog::builder()
-                    .transient_for(root)
-                    .modal(true)
-                    .program_name("Sleeve")
+                adw::AboutDialog::builder()
+                    .application_icon("com.github.anson2251.sleeve")
+                    .application_name("Sleeve")
                     .comments("音频标签与封面编辑器")
+                    .copyright("© 2026 Anson2251")
+                    .developer_name("Anson2251")
+                    .license_type(gtk::License::Custom)
+                    .license(
+                        "This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.\n\nThis program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.\n\nYou should have received a copy of the GNU General Public License along with this program.  If not, see <a href=\"https://www.gnu.org/licenses/\">https://www.gnu.org/licenses/</a>.",
+                    )
                     .website("https://github.com/anson2251/sleeve")
                     .build()
-                    .present();
+                    .present(Some(root));
             }
             AppMsg::ChooseCover => choose_cover(root, sender),
             AppMsg::CoverChosen(path) => {
