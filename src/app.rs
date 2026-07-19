@@ -3,6 +3,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     rc::Rc,
+    time::Duration,
 };
 
 use relm4::{
@@ -14,7 +15,8 @@ use relm4::{
 use crate::{
     models::{AudioFile, BackupVersion, CoverDraft, FileTreeNode, TagDraft, TagField},
     services::{
-        create_backup, list_backups, read_audio_file, restore_backup, scan_directory, write_draft,
+        clear_backups, create_backup, read_audio_file, restore_snapshot, scan_directory,
+        write_draft,
     },
     ui,
 };
@@ -36,9 +38,32 @@ pub struct AppModel {
     tree_rows: FactoryVecDeque<ui::tree_row::TreeRowComponent>,
     album_cover_textures: Rc<RefCell<HashMap<(PathBuf, i32), gdk::Texture>>>,
     cover_revision: u64,
-    backups: Vec<BackupVersion>,
-    backup_revision: u64,
+    histories: HashMap<PathBuf, FileHistory>,
+    pending_save: Option<PendingSave>,
+    save_in_progress: bool,
+    pending_action: Option<PendingAction>,
+    quitting: bool,
     draft_revision: u64,
+}
+
+#[derive(Debug, Default)]
+struct FileHistory {
+    undo: Vec<BackupVersion>,
+    redo: Vec<BackupVersion>,
+}
+
+#[derive(Debug)]
+struct PendingSave {
+    source: glib::SourceId,
+    path: PathBuf,
+}
+
+#[derive(Debug)]
+enum PendingAction {
+    Select(PathBuf),
+    OpenDirectory(PathBuf),
+    Undo,
+    Redo,
 }
 
 #[derive(Debug)]
@@ -49,13 +74,17 @@ pub enum AppMsg {
     SelectAudioFile(PathBuf),
     SetSidebarVisible(bool),
     SetInspectorVisible(bool),
+    ToggleSidebar,
+    ToggleInspector,
     SetField(TagField, String),
-    Save,
-    RestoreDraft,
+    SaveNow,
+    Undo,
+    Redo,
+    RequestClose,
+    ShowAbout,
     ChooseCover,
     CoverChosen(PathBuf),
     RemoveCover,
-    RestoreBackup(PathBuf),
     TreeRow(ui::tree_row::TreeRowOutput),
 }
 
@@ -63,9 +92,18 @@ pub enum AppMsg {
 pub enum CmdMsg {
     DirectoryScanned(Result<Option<FileTreeNode>, String>, PathBuf),
     AudioLoaded(Box<Result<AudioFile, String>>),
-    BackupsLoaded(Result<Vec<BackupVersion>, String>),
-    SaveFinished(Box<Result<AudioFile, String>>),
-    RestoreFinished(Box<Result<AudioFile, String>>),
+    SaveFinished {
+        result: Box<Result<AudioFile, String>>,
+        snapshot: Option<BackupVersion>,
+        draft: TagDraft,
+    },
+    HistoryRestored {
+        result: Box<Result<AudioFile, String>>,
+        current_snapshot: BackupVersion,
+        restored_snapshot: BackupVersion,
+        is_undo: bool,
+    },
+    BackupsCleared(Result<(), String>),
 }
 
 impl AppModel {
@@ -135,8 +173,6 @@ impl AppModel {
         self.original_draft = None;
         self.active_draft = TagDraft::default();
         self.cover_error = None;
-        self.backups.clear();
-        self.backup_revision = self.backup_revision.wrapping_add(1);
         self.cover_revision = self.cover_revision.wrapping_add(1);
         self.draft_revision = self.draft_revision.wrapping_add(1);
     }
@@ -248,13 +284,80 @@ impl AppModel {
         }
     }
 
-    fn refresh_backups(&self, sender: ComponentSender<Self>) {
-        let (Some(root), Some(file)) = (&self.root_directory, &self.selected_file) else {
+    fn schedule_save(&mut self, sender: ComponentSender<Self>) {
+        let Some(file) = self.selected_file.as_ref() else {
             return;
         };
-        let root = root.clone();
+        if let Some(pending) = self.pending_save.take() {
+            pending.source.remove();
+        }
+        let path = file.path.clone();
+        let save_sender = sender.clone();
+        let source = glib::timeout_add_local_once(Duration::from_millis(500), move || {
+            save_sender.input(AppMsg::SaveNow);
+        });
+        self.pending_save = Some(PendingSave { source, path });
+    }
+
+    fn save_current(&mut self, sender: ComponentSender<Self>) {
+        if self.save_in_progress {
+            return;
+        }
+        let Some(pending) = self.pending_save.take() else {
+            return;
+        };
+        if !self.active_draft.is_valid() {
+            self.status = "请先修正表单中的无效字段。".into();
+            return;
+        }
+        let (Some(file), Some(root)) = (&self.selected_file, &self.root_directory) else {
+            return;
+        };
+        if pending.path != file.path {
+            return;
+        }
         let source = file.path.clone();
-        sender.spawn_oneshot_command(move || CmdMsg::BackupsLoaded(list_backups(&root, &source)));
+        let root = root.clone();
+        let draft = self.active_draft.clone();
+        self.save_in_progress = true;
+        self.status = "正在保存标签…".into();
+        sender.spawn_oneshot_command(move || {
+            let result = create_backup(&root, &source).and_then(|snapshot| {
+                write_draft(&source, &draft)
+                    .and_then(|_| read_audio_file(source.clone(), root))
+                    .map(|file| (file, snapshot))
+            });
+            match result {
+                Ok((file, snapshot)) => CmdMsg::SaveFinished {
+                    result: Box::new(Ok(file)),
+                    snapshot: Some(snapshot),
+                    draft: draft.clone(),
+                },
+                Err(error) => CmdMsg::SaveFinished {
+                    result: Box::new(Err(error)),
+                    snapshot: None,
+                    draft,
+                },
+            }
+        });
+    }
+
+    fn finish_pending_action(&mut self, sender: ComponentSender<Self>) {
+        match self.pending_action.take() {
+            Some(PendingAction::Select(path)) => sender.input(AppMsg::SelectAudioFile(path)),
+            Some(PendingAction::OpenDirectory(path)) => sender.input(AppMsg::DirectoryChosen(path)),
+            Some(PendingAction::Undo) => sender.input(AppMsg::Undo),
+            Some(PendingAction::Redo) => sender.input(AppMsg::Redo),
+            None => {}
+        }
+    }
+
+    fn finish_close(&mut self, sender: ComponentSender<Self>, root: &gtk::Window) {
+        if let Some(directory) = self.root_directory.clone() {
+            sender.spawn_oneshot_command(move || CmdMsg::BackupsCleared(clear_backups(&directory)));
+        } else {
+            root.destroy();
+        }
     }
 }
 
@@ -267,15 +370,13 @@ impl Component for AppModel {
 
     additional_fields! {
         rendered_cover_revision: Cell<u64>,
-        rendered_backup_revision: Cell<u64>,
         rendered_draft_revision: Cell<u64>,
         sidebar_button: gtk::ToggleButton,
         inspector_button: gtk::ToggleButton,
         syncing: Rc<Cell<bool>>,
         status_label: gtk::Label,
-        restore_popover: gtk::Popover,
-        backup_list: gtk::Box,
-        restore_button: gtk::Button,
+        undo_button: gtk::Button,
+        redo_button: gtk::Button,
     }
 
     view! {
@@ -411,12 +512,7 @@ impl Component for AppModel {
                                 },
                             },
                             gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::Genre).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::Genre).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                            gtk::Box {
-                                set_spacing: 8,
-                                set_halign: gtk::Align::End,
-                                gtk::Button { set_label: "还原", connect_clicked => AppMsg::RestoreDraft },
-                                gtk::Button { set_label: "保存", connect_clicked => AppMsg::Save },
-                            },
+
                         },
                         gtk::Label {
                             set_label: "请从左侧选择一个音频文件",
@@ -556,13 +652,15 @@ impl Component for AppModel {
                 .forward(sender.input_sender(), AppMsg::TreeRow),
             album_cover_textures: album_cover_textures.clone(),
             cover_revision: 0,
-            backups: Vec::new(),
-            backup_revision: 0,
+            histories: HashMap::new(),
+            pending_save: None,
+            save_in_progress: false,
+            pending_action: None,
+            quitting: false,
             draft_revision: 0,
         };
         let syncing = Rc::new(Cell::new(false));
         let rendered_cover_revision = Cell::new(u64::MAX);
-        let rendered_backup_revision = Cell::new(u64::MAX);
         let rendered_draft_revision = Cell::new(u64::MAX);
 
         if let Some(display) = gdk::Display::default() {
@@ -578,6 +676,7 @@ impl Component for AppModel {
         let sidebar_button = gtk::ToggleButton::builder()
             .icon_name("sidebar-show-symbolic")
             .tooltip_text("显示或隐藏文件列表")
+            .sensitive(false)
             .build();
         let sidebar_sender = sender.clone();
         sidebar_button.connect_toggled(move |button| {
@@ -596,6 +695,7 @@ impl Component for AppModel {
         let inspector_button = gtk::ToggleButton::builder()
             .icon_name("dialog-information-symbolic")
             .tooltip_text("显示或隐藏元信息与封面")
+            .sensitive(false)
             .build();
         let inspector_sender = sender.clone();
         inspector_button.connect_toggled(move |button| {
@@ -610,7 +710,7 @@ impl Component for AppModel {
              .file-tree-row.selected { background: alpha(@accent_bg_color, 0.22); color: @accent_fg_color; }\
              .file-tree-row:focus { box-shadow: none; outline: none; }\
              .regular-file { font-weight: normal; }\
-             .tree-thumbnail, .album-thumbnail { min-width: 24px; min-height: 24px; max-width: 24px; max-height: 24px; border-radius: 4px;}",
+             .tree-thumbnail, .album-thumbnail { min-width: 24px; min-height: 24px; border-radius: 4px;}",
         );
         if let Some(display) = gdk::Display::default() {
             gtk::style_context_add_provider_for_display(
@@ -620,25 +720,23 @@ impl Component for AppModel {
             );
         }
 
-        let restore_button = gtk::Button::builder()
-            .icon_name("document-revert-symbolic")
-            .tooltip_text("恢复备份")
+        let undo_button = gtk::Button::builder()
+            .icon_name("edit-undo-symbolic")
+            .tooltip_text("撤销（⌘Z / Ctrl+Z）")
+            .sensitive(false)
             .build();
-        restore_button.set_sensitive(false);
-        let restore_popover = gtk::Popover::new();
-        let backup_list = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(6)
-            .margin_top(8)
-            .margin_bottom(8)
-            .margin_start(8)
-            .margin_end(8)
+        let undo_sender = sender.clone();
+        undo_button.connect_clicked(move |_| undo_sender.input(AppMsg::Undo));
+        header_bar.pack_end(&undo_button);
+
+        let redo_button = gtk::Button::builder()
+            .icon_name("edit-redo-symbolic")
+            .tooltip_text("重做（⇧⌘Z / Ctrl+Shift+Z）")
+            .sensitive(false)
             .build();
-        restore_popover.set_child(Some(&backup_list));
-        restore_popover.set_parent(&restore_button);
-        let popover_for_click = restore_popover.clone();
-        restore_button.connect_clicked(move |_| popover_for_click.popup());
-        header_bar.pack_end(&restore_button);
+        let redo_sender = sender.clone();
+        redo_button.connect_clicked(move |_| redo_sender.input(AppMsg::Redo));
+        header_bar.pack_end(&redo_button);
 
         let status_label = gtk::Label::builder()
             .label(model.header_title())
@@ -652,6 +750,7 @@ impl Component for AppModel {
 
         configure_macos_window(&root);
         configure_macos_window_style();
+        configure_macos_menubar(&root, sender.clone());
 
         let drop_target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
         let drop_sender = sender.clone();
@@ -664,6 +763,31 @@ impl Component for AppModel {
                 .is_some()
         });
         widgets.cover_frame.add_controller(drop_target);
+
+        let key_controller = gtk::EventControllerKey::new();
+        key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let key_sender = sender.clone();
+        key_controller.connect_key_pressed(move |_, key, _, modifiers| {
+            let primary = modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+                || modifiers.contains(gdk::ModifierType::META_MASK);
+            if !primary || key != gdk::Key::z && key != gdk::Key::Z {
+                return glib::Propagation::Proceed;
+            }
+            if modifiers.contains(gdk::ModifierType::SHIFT_MASK) {
+                key_sender.input(AppMsg::Redo);
+            } else {
+                key_sender.input(AppMsg::Undo);
+            }
+            glib::Propagation::Stop
+        });
+        root.add_controller(key_controller);
+
+        let close_sender = sender.clone();
+        root.connect_close_request(move |_| {
+            close_sender.input(AppMsg::RequestClose);
+            glib::Propagation::Stop
+        });
+
         ComponentParts { model, widgets }
     }
 
@@ -671,11 +795,17 @@ impl Component for AppModel {
         match msg {
             AppMsg::ChooseDirectory => choose_directory(root, sender),
             AppMsg::DirectoryChosen(path) => {
+                if self.pending_save.is_some() || self.save_in_progress {
+                    self.pending_action = Some(PendingAction::OpenDirectory(path));
+                    self.save_current(sender);
+                    return;
+                }
                 self.sidebar_visible = true;
                 self.status = format!("正在扫描 {}…", path.display());
                 self.root_directory = Some(path.clone());
                 self.tree = None;
                 self.expanded_paths.clear();
+                self.histories.clear();
                 self.tree_revision = self.tree_revision.wrapping_add(1);
                 self.clear_selection();
                 sender.spawn_oneshot_command(move || {
@@ -684,6 +814,13 @@ impl Component for AppModel {
             }
 
             AppMsg::SelectAudioFile(path) => {
+                if self.selected_path.as_deref() != Some(path.as_path())
+                    && (self.pending_save.is_some() || self.save_in_progress)
+                {
+                    self.pending_action = Some(PendingAction::Select(path));
+                    self.save_current(sender);
+                    return;
+                }
                 self.set_selected_path(Some(path.clone()));
                 let Some(root_path) = self.root_directory.clone() else {
                     return;
@@ -697,39 +834,91 @@ impl Component for AppModel {
             AppMsg::SetInspectorVisible(visible) => {
                 self.inspector_visible = visible && self.selected_file.is_some();
             }
+            AppMsg::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
+            AppMsg::ToggleInspector => {
+                if self.selected_file.is_some() {
+                    self.inspector_visible = !self.inspector_visible;
+                }
+            }
             AppMsg::TreeRow(output) => match output {
                 ui::tree_row::TreeRowOutput::ToggleDirectory(path) => self.toggle_directory(&path),
                 ui::tree_row::TreeRowOutput::SelectAudioFile(path) => {
                     sender.input(AppMsg::SelectAudioFile(path))
                 }
             },
-            AppMsg::SetField(field, value) => self.active_draft.set(field, value),
-            AppMsg::Save => {
-                if !self.active_draft.is_valid() {
-                    self.status = "请先修正表单中的无效字段。".into();
-                } else if let (Some(file), Some(root)) = (&self.selected_file, &self.root_directory)
-                {
-                    let source = file.path.clone();
-                    let root = root.clone();
-                    let draft = self.active_draft.clone();
-                    self.status = "正在备份并保存标签…".into();
-                    sender.spawn_oneshot_command(move || {
-                        let result = create_backup(&root, &source)
-                            .and_then(|_| write_draft(&source, &draft))
-                            .and_then(|_| read_audio_file(source, root));
-                        CmdMsg::SaveFinished(Box::new(result))
+            AppMsg::SetField(field, value) => {
+                self.active_draft.set(field, value);
+                self.schedule_save(sender);
+            }
+            AppMsg::SaveNow => self.save_current(sender),
+            AppMsg::Undo | AppMsg::Redo => {
+                let is_undo = matches!(msg, AppMsg::Undo);
+                if self.pending_save.is_some() || self.save_in_progress {
+                    self.pending_action = Some(if is_undo {
+                        PendingAction::Undo
+                    } else {
+                        PendingAction::Redo
                     });
+                    self.save_current(sender);
+                    return;
+                }
+                let (Some(file), Some(root)) = (&self.selected_file, &self.root_directory) else {
+                    return;
+                };
+                let history = self.histories.entry(file.path.clone()).or_default();
+                let snapshot = if is_undo {
+                    history.undo.pop()
+                } else {
+                    history.redo.pop()
+                };
+                let Some(snapshot) = snapshot else {
+                    return;
+                };
+                let source = file.path.clone();
+                let root = root.clone();
+                sender.spawn_oneshot_command(move || {
+                    let result = create_backup(&root, &source).and_then(|current_snapshot| {
+                        restore_snapshot(&source, &snapshot.path)
+                            .and_then(|_| read_audio_file(source.clone(), root))
+                            .map(|file| (file, current_snapshot))
+                    });
+                    match result {
+                        Ok((file, current_snapshot)) => CmdMsg::HistoryRestored {
+                            result: Box::new(Ok(file)),
+                            current_snapshot,
+                            restored_snapshot: snapshot,
+                            is_undo,
+                        },
+                        Err(error) => CmdMsg::HistoryRestored {
+                            result: Box::new(Err(error)),
+                            current_snapshot: BackupVersion {
+                                timestamp: String::new(),
+                                path: PathBuf::new(),
+                                size_bytes: 0,
+                            },
+                            restored_snapshot: snapshot,
+                            is_undo,
+                        },
+                    }
+                });
+            }
+            AppMsg::RequestClose => {
+                self.quitting = true;
+                if self.pending_save.is_some() || self.save_in_progress {
+                    self.save_current(sender);
+                } else {
+                    self.finish_close(sender, root);
                 }
             }
-            AppMsg::RestoreDraft => {
-                if let (Some(file), Some(original)) = (&self.selected_file, &self.original_draft) {
-                    self.active_draft = original.clone();
-                    self.saved_drafts.remove(&file.path);
-                    self.cover_error = None;
-                    self.cover_revision = self.cover_revision.wrapping_add(1);
-                    self.draft_revision = self.draft_revision.wrapping_add(1);
-                    self.status = "已恢复为文件中的原始标签。".into();
-                }
+            AppMsg::ShowAbout => {
+                gtk::AboutDialog::builder()
+                    .transient_for(root)
+                    .modal(true)
+                    .program_name("Sleeve")
+                    .comments("音频标签与封面编辑器")
+                    .website("https://github.com/anson2251/sleeve")
+                    .build()
+                    .present();
             }
             AppMsg::ChooseCover => choose_cover(root, sender),
             AppMsg::CoverChosen(path) => {
@@ -742,6 +931,7 @@ impl Component for AppModel {
                     self.active_draft.cover = CoverDraft::External(path);
                     self.cover_error = None;
                     self.cover_revision = self.cover_revision.wrapping_add(1);
+                    self.schedule_save(sender);
                 } else {
                     self.cover_error = Some("请选择有效的图片文件。".into());
                 }
@@ -749,18 +939,7 @@ impl Component for AppModel {
             AppMsg::RemoveCover => {
                 self.active_draft.cover = CoverDraft::Removed;
                 self.cover_revision = self.cover_revision.wrapping_add(1);
-            }
-            AppMsg::RestoreBackup(backup) => {
-                if let (Some(file), Some(root)) = (&self.selected_file, &self.root_directory) {
-                    let source = file.path.clone();
-                    let root = root.clone();
-                    self.status = "正在备份当前文件并恢复版本…".into();
-                    sender.spawn_oneshot_command(move || {
-                        let result = restore_backup(&root, &source, &backup)
-                            .and_then(|_| read_audio_file(source, root));
-                        CmdMsg::RestoreFinished(Box::new(result))
-                    });
-                }
+                self.schedule_save(sender);
             }
         }
     }
@@ -781,35 +960,85 @@ impl Component for AppModel {
                 Err(error) => self.status = error,
             },
             CmdMsg::AudioLoaded(result) => match *result {
-                Ok(file) => {
-                    self.load_file(file, "正在编辑 {}。");
-                    self.refresh_backups(sender.clone());
-                }
+                Ok(file) => self.load_file(file, "正在编辑 {}。"),
                 Err(error) => {
                     self.clear_selection();
                     self.status = error;
                 }
             },
-            CmdMsg::BackupsLoaded(result) => match result {
-                Ok(backups) => {
-                    self.backups = backups;
-                    self.backup_revision = self.backup_revision.wrapping_add(1);
+            CmdMsg::SaveFinished {
+                result,
+                snapshot,
+                draft,
+            } => {
+                self.save_in_progress = false;
+                match *result {
+                    Ok(file) => {
+                        if let Some(snapshot) = snapshot {
+                            let history = self.histories.entry(file.path.clone()).or_default();
+                            history.undo.push(snapshot);
+                            history.redo.clear();
+                        }
+                        if self.active_draft == draft {
+                            self.load_file(file, "已自动保存。");
+                        } else {
+                            self.status = "已自动保存，正在等待后续修改。".into();
+                        }
+                        if self.pending_save.is_some() {
+                            self.save_current(sender);
+                        } else if self.quitting {
+                            self.finish_close(sender, _root);
+                        } else {
+                            self.finish_pending_action(sender);
+                        }
+                    }
+                    Err(error) => {
+                        self.status = error;
+                        self.quitting = false;
+                    }
                 }
-                Err(error) => self.status = error,
-            },
-            CmdMsg::SaveFinished(result) => match *result {
+            }
+            CmdMsg::HistoryRestored {
+                result,
+                current_snapshot,
+                restored_snapshot,
+                is_undo,
+            } => match *result {
                 Ok(file) => {
-                    self.load_file(file, "已保存标签与封面。");
-                    self.refresh_backups(sender.clone());
+                    let history = self.histories.entry(file.path.clone()).or_default();
+                    if is_undo {
+                        history.redo.push(current_snapshot);
+                    } else {
+                        history.undo.push(current_snapshot);
+                    }
+                    self.load_file(
+                        file,
+                        if is_undo {
+                            "已撤销。"
+                        } else {
+                            "已重做。"
+                        },
+                    );
                 }
-                Err(error) => self.status = error,
+                Err(error) => {
+                    let history = self
+                        .histories
+                        .entry(self.selected_path.clone().unwrap_or_default())
+                        .or_default();
+                    if is_undo {
+                        history.undo.push(restored_snapshot);
+                    } else {
+                        history.redo.push(restored_snapshot);
+                    }
+                    self.status = error;
+                }
             },
-            CmdMsg::RestoreFinished(result) => match *result {
-                Ok(file) => {
-                    self.load_file(file, "已恢复备份版本。");
-                    self.refresh_backups(sender.clone());
+            CmdMsg::BackupsCleared(result) => match result {
+                Ok(()) => _root.destroy(),
+                Err(error) => {
+                    self.status = error;
+                    self.quitting = false;
                 }
-                Err(error) => self.status = error,
             },
         }
     }
@@ -824,10 +1053,12 @@ impl Component for AppModel {
         if rendered_cover_revision.replace(model.cover_revision) != model.cover_revision {
             cover_dimensions.set_label(&update_cover(cover, &model.active_draft.cover));
         }
-        if rendered_backup_revision.replace(model.backup_revision) != model.backup_revision {
-            restore_button.set_sensitive(!model.backups.is_empty());
-            refresh_backup_list(backup_list, &model.backups, sender.clone());
-        }
+        let history = model
+            .selected_file
+            .as_ref()
+            .and_then(|file| model.histories.get(&file.path));
+        undo_button.set_sensitive(history.is_some_and(|history| !history.undo.is_empty()));
+        redo_button.set_sensitive(history.is_some_and(|history| !history.redo.is_empty()));
         if rendered_draft_revision.replace(model.draft_revision) != model.draft_revision {
             syncing.set(true);
             sync_entry(title_entry, &model.active_draft.title);
@@ -842,6 +1073,261 @@ impl Component for AppModel {
         }
     }
 }
+
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
+
+#[cfg(target_os = "macos")]
+static MACOS_MENU_CALLBACK: OnceLock<Box<dyn Fn(AppMsg) + Send + Sync>> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+static MACOS_MENU_TARGET: OnceLock<objc2::rc::Retained<SleeveMenuHandler>> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+objc2::define_class!(
+    #[unsafe(super(objc2::runtime::NSObject))]
+    #[name = "SleeveMenuHandler"]
+    struct SleeveMenuHandler;
+
+    impl SleeveMenuHandler {
+        #[unsafe(method(handleMenuAction:))]
+        fn handle_menu_action(&self, sender: &objc2::runtime::NSObject) {
+            use objc2::msg_send;
+
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            let message = match tag {
+                1 => AppMsg::ShowAbout,
+                2 => AppMsg::ChooseDirectory,
+                3 => AppMsg::Undo,
+                4 => AppMsg::Redo,
+                5 => AppMsg::ToggleSidebar,
+                6 => AppMsg::ToggleInspector,
+                7 => AppMsg::RequestClose,
+                _ => return,
+            };
+            if let Some(callback) = MACOS_MENU_CALLBACK.get() {
+                callback(message);
+            }
+        }
+    }
+);
+
+#[cfg(target_os = "macos")]
+impl SleeveMenuHandler {
+    objc2::extern_methods!(
+        #[unsafe(method(new))]
+        fn new() -> objc2::rc::Retained<Self>;
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn configure_macos_menubar(_: &gtk::Window, sender: ComponentSender<AppModel>) {
+    use objc2::{MainThreadMarker, sel};
+    use objc2_app_kit::{NSApp, NSEventModifierFlags, NSMenu, NSMenuItem};
+
+    let menu_sender = sender.clone();
+    let (tx, rx) = std::sync::mpsc::channel::<AppMsg>();
+    let _ = MACOS_MENU_CALLBACK.set(Box::new(move |message| {
+        let _ = tx.send(message);
+    }));
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        while let Ok(message) = rx.try_recv() {
+            menu_sender.input(message);
+        }
+        glib::ControlFlow::Continue
+    });
+
+    let _ = MACOS_MENU_TARGET.set(SleeveMenuHandler::new());
+    let target = MACOS_MENU_TARGET
+        .get()
+        .expect("macOS menu target should be initialized");
+    let mtm = unsafe { MainThreadMarker::new_unchecked() };
+
+    unsafe {
+        let main_menu = NSMenu::init(mtm.alloc::<NSMenu>());
+        let app_menu_item = NSMenuItem::init(mtm.alloc::<NSMenuItem>());
+        let app_menu = NSMenu::init(mtm.alloc::<NSMenu>());
+        app_menu_item.setSubmenu(Some(&app_menu));
+        main_menu.addItem(&app_menu_item);
+
+        add_macos_callback_item(&app_menu, mtm, target, "关于 Sleeve", 1, None);
+        app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+        add_macos_responder_item(
+            &app_menu,
+            mtm,
+            "隐藏 Sleeve",
+            sel!(hide:),
+            "h",
+            NSEventModifierFlags::Command,
+        );
+        add_macos_responder_item(
+            &app_menu,
+            mtm,
+            "隐藏其他",
+            sel!(hideOtherApplications:),
+            "h",
+            NSEventModifierFlags::Command | NSEventModifierFlags::Option,
+        );
+        add_macos_responder_item(
+            &app_menu,
+            mtm,
+            "全部显示",
+            sel!(unhideAllApplications:),
+            "",
+            NSEventModifierFlags::empty(),
+        );
+        app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+        add_macos_callback_item(
+            &app_menu,
+            mtm,
+            target,
+            "退出 Sleeve",
+            7,
+            Some(("q", NSEventModifierFlags::Command)),
+        );
+
+        let file_menu = add_macos_submenu(&main_menu, mtm, "文件");
+        add_macos_callback_item(
+            &file_menu,
+            mtm,
+            target,
+            "打开目录…",
+            2,
+            Some(("o", NSEventModifierFlags::Command)),
+        );
+
+        let edit_menu = add_macos_submenu(&main_menu, mtm, "编辑");
+        add_macos_callback_item(
+            &edit_menu,
+            mtm,
+            target,
+            "撤销",
+            3,
+            Some(("z", NSEventModifierFlags::Command)),
+        );
+        add_macos_callback_item(
+            &edit_menu,
+            mtm,
+            target,
+            "重做",
+            4,
+            Some((
+                "z",
+                NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+            )),
+        );
+        edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
+        add_macos_responder_item(
+            &edit_menu,
+            mtm,
+            "剪切",
+            sel!(cut:),
+            "x",
+            NSEventModifierFlags::Command,
+        );
+        add_macos_responder_item(
+            &edit_menu,
+            mtm,
+            "复制",
+            sel!(copy:),
+            "c",
+            NSEventModifierFlags::Command,
+        );
+        add_macos_responder_item(
+            &edit_menu,
+            mtm,
+            "粘贴",
+            sel!(paste:),
+            "v",
+            NSEventModifierFlags::Command,
+        );
+        edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
+        add_macos_responder_item(
+            &edit_menu,
+            mtm,
+            "全选",
+            sel!(selectAll:),
+            "a",
+            NSEventModifierFlags::Command,
+        );
+
+        let view_menu = add_macos_submenu(&main_menu, mtm, "显示");
+        add_macos_callback_item(&view_menu, mtm, target, "显示/隐藏文件列表", 5, None);
+        add_macos_callback_item(&view_menu, mtm, target, "显示/隐藏检查器", 6, None);
+
+        NSApp(mtm).setMainMenu(Some(&main_menu));
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_macos_submenu(
+    main_menu: &objc2_app_kit::NSMenu,
+    mtm: objc2::MainThreadMarker,
+    title: &str,
+) -> objc2::rc::Retained<objc2_app_kit::NSMenu> {
+    use objc2_app_kit::{NSMenu, NSMenuItem};
+    use objc2_foundation::NSString;
+
+    let item = NSMenuItem::init(mtm.alloc::<NSMenuItem>());
+    let menu = NSMenu::init(mtm.alloc::<NSMenu>());
+    menu.setTitle(&NSString::from_str(title));
+    item.setSubmenu(Some(&menu));
+    main_menu.addItem(&item);
+    menu
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_macos_callback_item(
+    menu: &objc2_app_kit::NSMenu,
+    mtm: objc2::MainThreadMarker,
+    target: &SleeveMenuHandler,
+    title: &str,
+    tag: isize,
+    shortcut: Option<(&str, objc2_app_kit::NSEventModifierFlags)>,
+) {
+    use objc2::sel;
+    use objc2_app_kit::NSMenuItem;
+    use objc2_foundation::NSString;
+
+    let item = NSMenuItem::init(mtm.alloc::<NSMenuItem>());
+    item.setTitle(&NSString::from_str(title));
+    unsafe {
+        item.setAction(Some(sel!(handleMenuAction:)));
+        item.setTarget(Some(target));
+    }
+    item.setTag(tag);
+    if let Some((key, modifiers)) = shortcut {
+        item.setKeyEquivalent(&NSString::from_str(key));
+        item.setKeyEquivalentModifierMask(modifiers);
+    }
+    menu.addItem(&item);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_macos_responder_item(
+    menu: &objc2_app_kit::NSMenu,
+    mtm: objc2::MainThreadMarker,
+    title: &str,
+    action: objc2::runtime::Sel,
+    key: &str,
+    modifiers: objc2_app_kit::NSEventModifierFlags,
+) {
+    use objc2_app_kit::NSMenuItem;
+    use objc2_foundation::NSString;
+
+    let item = NSMenuItem::init(mtm.alloc::<NSMenuItem>());
+    item.setTitle(&NSString::from_str(title));
+    unsafe {
+        item.setAction(Some(action));
+        item.setTarget(None);
+    }
+    item.setKeyEquivalent(&NSString::from_str(key));
+    item.setKeyEquivalentModifierMask(modifiers);
+    menu.addItem(&item);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_macos_menubar(_: &gtk::Window, _: ComponentSender<AppModel>) {}
 
 #[cfg(target_os = "macos")]
 fn configure_macos_window(window: &gtk::Window) {
@@ -916,27 +1402,6 @@ fn choose_cover(root: &gtk::Window, sender: ComponentSender<AppModel>) {
 fn sync_entry(entry: &gtk::Entry, value: &str) {
     if entry.text().as_str() != value {
         entry.set_text(value);
-    }
-}
-
-fn refresh_backup_list(
-    container: &gtk::Box,
-    backups: &[BackupVersion],
-    sender: ComponentSender<AppModel>,
-) {
-    ui::file_tree::clear(container);
-    for backup in backups {
-        let button = gtk::Button::with_label(&format!(
-            "恢复 {} · {}",
-            backup.timestamp,
-            format_byte_size(backup.size_bytes)
-        ));
-        let backup_path = backup.path.clone();
-        let restore_sender = sender.clone();
-        button.connect_clicked(move |_| {
-            restore_sender.input(AppMsg::RestoreBackup(backup_path.clone()))
-        });
-        container.append(&button);
     }
 }
 
