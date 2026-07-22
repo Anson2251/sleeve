@@ -747,30 +747,33 @@ impl Component for AppModel {
                     set_content = &gtk::Box {
                         set_orientation: gtk::Orientation::Horizontal,
 
-                        #[name = "editor"]
-                        gtk::Overlay {
-                            set_hexpand: true,
-                            set_vexpand: true,
-                            set_width_request: 480,
-                            add_overlay = &gtk::Box {
-                            set_orientation: gtk::Orientation::Vertical,
-                            set_spacing: 8,
-                            set_hexpand: true,
-                            set_width_request: 480,
-                            set_margin_all: 20,
+                        gtk::Box {
                             #[watch]
                             set_visible: model.selected_file.is_some(),
-                            #[watch]
-                            set_sensitive: !model.is_saving(),
-                            gtk::Label {
-                                #[watch]
-                                set_label: &model.selection_summary(),
-                                set_halign: gtk::Align::Start,
-                                add_css_class: "title-4",
-                            },
-                            #[local_ref]
-                            form -> gtk::Box {},
 
+                            #[name = "editor"]
+                            gtk::Overlay {
+                                set_hexpand: true,
+                                set_vexpand: true,
+                                set_width_request: 480,
+                                add_overlay = &gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 8,
+                                set_hexpand: true,
+                                set_width_request: 480,
+                                set_margin_all: 20,
+                                #[watch]
+                                set_sensitive: !model.is_saving(),
+                                gtk::Label {
+                                    #[watch]
+                                    set_label: &model.selection_summary(),
+                                    set_halign: gtk::Align::Start,
+                                    add_css_class: "title-4",
+                                },
+                                #[local_ref]
+                                form -> gtk::Box {},
+
+                                },
                             },
                         },
                         gtk::Label {
