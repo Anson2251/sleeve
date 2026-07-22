@@ -162,6 +162,25 @@ impl FileTreeNode {
     }
 }
 
+pub fn audio_paths_between(rows: &[TreeRow], start: &Path, end: &Path) -> Vec<PathBuf> {
+    let start_index = rows.iter().position(|row| row.path == start);
+    let end_index = rows.iter().position(|row| row.path == end);
+    let (Some(start_index), Some(end_index)) = (start_index, end_index) else {
+        return Vec::new();
+    };
+    let (start_index, end_index) = if start_index <= end_index {
+        (start_index, end_index)
+    } else {
+        (end_index, start_index)
+    };
+
+    rows[start_index..=end_index]
+        .iter()
+        .filter(|row| !row.is_directory)
+        .map(|row| row.path.clone())
+        .collect()
+}
+
 fn display_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -238,6 +257,61 @@ mod tests {
         assert_eq!(
             tree.album_directory_paths(),
             vec![PathBuf::from("music/album")]
+        );
+    }
+
+    #[test]
+    fn selects_only_visible_audio_paths_in_an_inclusive_range() {
+        let rows = vec![
+            TreeRow {
+                name: "Album".into(),
+                path: PathBuf::from("music/album"),
+                depth: 0,
+                is_directory: true,
+                is_album: false,
+                album_cover: None,
+                expanded: true,
+            },
+            TreeRow {
+                name: "first.flac".into(),
+                path: PathBuf::from("music/album/first.flac"),
+                depth: 1,
+                is_directory: false,
+                is_album: false,
+                album_cover: None,
+                expanded: false,
+            },
+            TreeRow {
+                name: "second.flac".into(),
+                path: PathBuf::from("music/album/second.flac"),
+                depth: 1,
+                is_directory: false,
+                is_album: false,
+                album_cover: None,
+                expanded: false,
+            },
+            TreeRow {
+                name: "other.flac".into(),
+                path: PathBuf::from("music/other.flac"),
+                depth: 0,
+                is_directory: false,
+                is_album: false,
+                album_cover: None,
+                expanded: false,
+            },
+        ];
+
+        assert_eq!(
+            audio_paths_between(
+                &rows,
+                Path::new("music/album/first.flac"),
+                Path::new("music/other.flac"),
+            ),
+            vec![
+                PathBuf::from("music/album/first.flac"),
+                PathBuf::from("music/album/second.flac"),
+                PathBuf::from("music/other.flac"),
+            ]
         );
     }
 

@@ -14,12 +14,15 @@ pub const ALBUM_ICON_SIZE: i32 = 20;
 #[derive(Debug)]
 pub enum TreeRowOutput {
     ToggleDirectory(PathBuf),
-    SelectAudioFile(PathBuf),
+    SelectAudioFile {
+        path: PathBuf,
+        modifiers: gdk::ModifierType,
+    },
 }
 
 #[derive(Debug)]
 pub enum TreeRowMsg {
-    Activate,
+    Activate(gdk::ModifierType),
 }
 
 pub struct TreeRowInit {
@@ -72,7 +75,11 @@ impl FactoryComponent for TreeRowComponent {
             add_css_class: "file-tree-row",
             #[watch]
             set_class_active: ("selected", self.selected),
-            connect_clicked => TreeRowMsg::Activate,
+            add_controller = gtk::GestureClick {
+                connect_pressed[sender] => move |gesture, _, _, _| {
+                    sender.input(TreeRowMsg::Activate(gesture.current_event_state()));
+                },
+            },
             gtk::Box {
                 set_spacing: 6,
                 #[watch]
@@ -163,11 +170,14 @@ impl FactoryComponent for TreeRowComponent {
 
     fn update(&mut self, msg: Self::Input, sender: FactorySender<Self>) {
         match msg {
-            TreeRowMsg::Activate => {
+            TreeRowMsg::Activate(modifiers) => {
                 let output = if self.row.is_directory {
                     TreeRowOutput::ToggleDirectory(self.row.path.clone())
                 } else {
-                    TreeRowOutput::SelectAudioFile(self.row.path.clone())
+                    TreeRowOutput::SelectAudioFile {
+                        path: self.row.path.clone(),
+                        modifiers,
+                    }
                 };
                 sender.output(output).expect("tree row parent was dropped");
             }

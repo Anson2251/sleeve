@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     hash::{Hash, Hasher},
     path::PathBuf,
     rc::Rc,
@@ -18,7 +18,10 @@ use relm4::{
 };
 
 use crate::{
-    models::{AudioFile, BackupVersion, CoverDraft, FileTreeNode, TagDraft, TagField},
+    models::{
+        AudioFile, BackupVersion, CoverDraft, FileTreeNode, TagDraft, TagField,
+        audio_paths_between, common_draft,
+    },
     services::{
         clear_backups, create_backup, read_audio_file, restore_snapshot, scan_directory,
         write_draft,
@@ -78,6 +81,10 @@ pub struct AppModel {
     expanded_paths: Vec<PathBuf>,
     selected_file: Option<AudioFile>,
     selected_path: Option<PathBuf>,
+    selected_paths: BTreeSet<PathBuf>,
+    mixed_fields: std::collections::HashSet<TagField>,
+    covers_mixed: bool,
+    selection_anchor: Option<PathBuf>,
     sidebar_visible: bool,
     inspector_visible: bool,
     original_draft: Option<TagDraft>,
@@ -86,33 +93,136 @@ pub struct AppModel {
     status: String,
     cover_error: Option<String>,
     tree_revision: u64,
+    selection_revision: u64,
+    batch_draft_revision: u64,
     tree_rows: FactoryVecDeque<ui::tree_row::TreeRowComponent>,
     album_cover_textures: Rc<RefCell<HashMap<(PathBuf, i32), gdk::Texture>>>,
     blurred_cover_cache: RefCell<BlurredCoverCache>,
     cover_revision: u64,
-    histories: HashMap<PathBuf, FileHistory>,
+    history: BatchHistory,
     pending_save: Option<PendingSave>,
+    pending_batch_save: Option<PendingBatchSave>,
     save_in_progress: bool,
+    batch_save_in_progress: bool,
     pending_action: Option<PendingAction>,
     quitting: bool,
+    close_dialog_open: bool,
     draft_revision: u64,
 }
 
+#[derive(Debug)]
+pub(crate) struct HistoryBatch {
+    snapshots: Vec<(PathBuf, BackupVersion)>,
+}
+
+impl HistoryBatch {
+    fn paths(&self) -> BTreeSet<PathBuf> {
+        self.snapshots
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+}
+
 #[derive(Debug, Default)]
-struct FileHistory {
-    undo: Vec<BackupVersion>,
-    redo: Vec<BackupVersion>,
+struct BatchHistory {
+    undo: Vec<HistoryBatch>,
+    redo: Vec<HistoryBatch>,
+}
+
+fn is_current_batch_draft_result(
+    result_paths: &BTreeSet<PathBuf>,
+    result_selection_revision: u64,
+    result_batch_draft_revision: u64,
+    selected_paths: &BTreeSet<PathBuf>,
+    selection_revision: u64,
+    batch_draft_revision: u64,
+) -> bool {
+    result_paths == selected_paths
+        && result_paths.len() > 1
+        && result_selection_revision == selection_revision
+        && result_batch_draft_revision == batch_draft_revision
+}
+
+impl BatchHistory {
+    fn can_undo(&self, selected_paths: &BTreeSet<PathBuf>) -> bool {
+        self.undo
+            .last()
+            .is_some_and(|batch| batch.paths() == *selected_paths)
+    }
+
+    fn can_redo(&self, selected_paths: &BTreeSet<PathBuf>) -> bool {
+        self.redo
+            .last()
+            .is_some_and(|batch| batch.paths() == *selected_paths)
+    }
+
+    fn record_save(&mut self, batch: HistoryBatch) {
+        self.undo.push(batch);
+        self.redo.clear();
+    }
+
+    fn take(&mut self, selected_paths: &BTreeSet<PathBuf>, is_undo: bool) -> Option<HistoryBatch> {
+        let stack = if is_undo {
+            &mut self.undo
+        } else {
+            &mut self.redo
+        };
+        stack
+            .last()
+            .is_some_and(|batch| batch.paths() == *selected_paths)
+            .then(|| stack.pop())
+            .flatten()
+    }
+
+    fn restore_failed(&mut self, batch: HistoryBatch, is_undo: bool) {
+        if is_undo {
+            self.undo.push(batch);
+        } else {
+            self.redo.push(batch);
+        }
+    }
+
+    fn complete_restore(&mut self, current: HistoryBatch, is_undo: bool) {
+        if is_undo {
+            self.redo.push(current);
+        } else {
+            self.undo.push(current);
+        }
+    }
 }
 
 #[derive(Debug)]
-struct PendingSave {
-    source: glib::SourceId,
+pub(crate) struct PendingSave {
+    source: Option<glib::SourceId>,
     path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PendingBatchSave {
+    paths: Vec<PathBuf>,
+    fields: HashMap<TagField, String>,
+    cover: Option<CoverDraft>,
+}
+
+impl PendingBatchSave {
+    fn is_empty(&self) -> bool {
+        self.fields.is_empty() && self.cover.is_none()
+    }
+}
+
 #[derive(Debug)]
+pub enum CloseAction {
+    Cancel,
+    Discard,
+    Save,
+}
+
 enum PendingAction {
-    Select(PathBuf),
+    Select {
+        path: PathBuf,
+        modifiers: gdk::ModifierType,
+    },
     OpenDirectory(PathBuf),
     Undo,
     Redo,
@@ -123,7 +233,10 @@ pub enum AppMsg {
     ChooseDirectory,
     DirectoryChosen(PathBuf),
 
-    SelectAudioFile(PathBuf),
+    SelectAudioFile {
+        path: PathBuf,
+        modifiers: gdk::ModifierType,
+    },
     SetSidebarVisible(bool),
     SetInspectorVisible(bool),
     ToggleSidebar,
@@ -133,6 +246,7 @@ pub enum AppMsg {
     Undo,
     Redo,
     RequestClose,
+    CloseAction(CloseAction),
     ShowAbout,
     ChooseCover,
     CoverChosen(PathBuf),
@@ -142,23 +256,121 @@ pub enum AppMsg {
 
 #[derive(Debug)]
 pub enum CmdMsg {
-    DirectoryScanned(Result<Option<FileTreeNode>, String>, PathBuf),
-    AudioLoaded(Box<Result<AudioFile, String>>),
+    DirectoryScanned {
+        result: Result<Option<FileTreeNode>, String>,
+        path: PathBuf,
+        revision: u64,
+    },
+    AudioLoaded {
+        result: Box<Result<AudioFile, String>>,
+        path: PathBuf,
+        revision: u64,
+    },
     SaveFinished {
         result: Box<Result<AudioFile, String>>,
         snapshot: Option<BackupVersion>,
         draft: TagDraft,
+        pending: PendingSave,
     },
-    HistoryRestored {
-        result: Box<Result<AudioFile, String>>,
-        current_snapshot: BackupVersion,
-        restored_snapshot: BackupVersion,
+    BatchSaveFinished {
+        result: Box<Result<Vec<AudioFile>, String>>,
+        batch: HistoryBatch,
+        pending: PendingBatchSave,
+    },
+    BatchDraftsLoaded {
+        paths: BTreeSet<PathBuf>,
+        drafts: Vec<TagDraft>,
+        selection_revision: u64,
+        batch_draft_revision: u64,
+    },
+    HistoryBatchRestored {
+        batch: HistoryBatch,
+        result: Box<Result<(Vec<AudioFile>, HistoryBatch), String>>,
         is_undo: bool,
     },
     BackupsCleared(Result<(), String>),
 }
 
+fn restore_history_batch(
+    root: &std::path::Path,
+    batch: &HistoryBatch,
+) -> Result<(Vec<AudioFile>, HistoryBatch), String> {
+    let mut restored_files = Vec::new();
+    let mut current_snapshots = Vec::new();
+    for (path, snapshot) in &batch.snapshots {
+        let current_snapshot = match create_backup(root, path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                rollback_history_batch(&current_snapshots)?;
+                return Err(error);
+            }
+        };
+        current_snapshots.push((path.clone(), current_snapshot));
+        if let Err(error) = restore_snapshot(path, &snapshot.path) {
+            rollback_history_batch(&current_snapshots)?;
+            return Err(error);
+        }
+        match read_audio_file(path.clone(), root.to_owned()) {
+            Ok(file) => restored_files.push(file),
+            Err(error) => {
+                rollback_history_batch(&current_snapshots)?;
+                return Err(error);
+            }
+        }
+    }
+    Ok((
+        restored_files,
+        HistoryBatch {
+            snapshots: current_snapshots,
+        },
+    ))
+}
+
+fn rollback_history_batch(snapshots: &[(PathBuf, BackupVersion)]) -> Result<(), String> {
+    let errors = snapshots
+        .iter()
+        .rev()
+        .filter_map(|(path, snapshot)| restore_snapshot(path, &snapshot.path).err())
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("回滚失败：{}", errors.join("；")))
+    }
+}
+
 impl AppModel {
+    fn has_pending_save(&self) -> bool {
+        self.pending_save.is_some()
+            || self
+                .pending_batch_save
+                .as_ref()
+                .is_some_and(|pending| !pending.is_empty())
+    }
+
+    fn is_saving(&self) -> bool {
+        self.save_in_progress || self.batch_save_in_progress
+    }
+
+    fn is_batch_editing(&self) -> bool {
+        self.selected_paths.len() > 1
+    }
+
+    fn selection_summary(&self) -> String {
+        match self.selected_paths.len() {
+            0 => "尚未选择文件".into(),
+            1 => self.selected_path(),
+            count => format!("已选择 {count} 个文件"),
+        }
+    }
+
+    fn field_placeholder(&self, field: TagField) -> &str {
+        self.mixed_fields
+            .contains(&field)
+            .then_some("多个值")
+            .unwrap_or("")
+    }
+
     fn selected_path(&self) -> String {
         self.selected_file
             .as_ref()
@@ -206,7 +418,9 @@ impl AppModel {
     }
 
     fn cover_hint(&self) -> &str {
-        if let Some(error) = &self.cover_error {
+        if self.is_batch_editing() && self.covers_mixed {
+            "多个封面：选择图片可批量替换，或移除全部封面"
+        } else if let Some(error) = &self.cover_error {
             error
         } else {
             match self.active_draft.cover {
@@ -221,7 +435,10 @@ impl AppModel {
     fn clear_selection(&mut self) {
         self.selected_file = None;
         self.inspector_visible = false;
-        self.set_selected_path(None);
+        self.set_selected_paths(BTreeSet::new());
+        self.selection_anchor = None;
+        self.mixed_fields.clear();
+        self.covers_mixed = false;
         self.original_draft = None;
         self.active_draft = TagDraft::default();
         self.cover_error = None;
@@ -256,11 +473,10 @@ impl AppModel {
             .as_ref()
             .map(|tree| tree.flatten(&self.expanded_paths))
             .unwrap_or_default();
-        let selected_path = self.selected_path.as_deref();
         let mut tree_rows = self.tree_rows.guard();
         tree_rows.clear();
         for row in rows {
-            let selected = !row.is_directory && selected_path == Some(row.path.as_path());
+            let selected = !row.is_directory && self.selected_paths.contains(&row.path);
             tree_rows.push_back(ui::tree_row::TreeRowInit {
                 row,
                 selected,
@@ -295,7 +511,6 @@ impl AppModel {
             .take_while(|row| row.depth > depth)
             .cloned()
             .collect::<Vec<_>>();
-        let selected_path = self.selected_path.as_deref();
         let mut tree_rows = self.tree_rows.guard();
         if let Some(row) = tree_rows.get_mut(index) {
             row.set_expanded(new_rows[index].expanded);
@@ -304,7 +519,7 @@ impl AppModel {
             tree_rows.remove(index + 1);
         }
         for (offset, row) in new_descendants.into_iter().enumerate() {
-            let selected = !row.is_directory && selected_path == Some(row.path.as_path());
+            let selected = !row.is_directory && self.selected_paths.contains(&row.path);
             tree_rows.insert(
                 index + 1 + offset,
                 ui::tree_row::TreeRowInit {
@@ -316,15 +531,106 @@ impl AppModel {
         }
     }
 
-    fn set_selected_path(&mut self, path: Option<PathBuf>) {
-        let previous = std::mem::replace(&mut self.selected_path, path.clone());
+    fn select_audio_file(&mut self, path: PathBuf, modifiers: gdk::ModifierType) -> bool {
+        let range = modifiers.contains(gdk::ModifierType::SHIFT_MASK);
+        let toggle = modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+            || modifiers.contains(gdk::ModifierType::META_MASK);
+        let mut selected_paths = if range && toggle {
+            self.selected_paths.clone()
+        } else if range {
+            BTreeSet::new()
+        } else if toggle {
+            self.selected_paths.clone()
+        } else {
+            BTreeSet::new()
+        };
+
+        if range {
+            let range_start = self.selection_anchor.as_deref().unwrap_or(path.as_path());
+            let paths = self
+                .tree
+                .as_ref()
+                .map(|tree| {
+                    audio_paths_between(&tree.flatten(&self.expanded_paths), range_start, &path)
+                })
+                .unwrap_or_default();
+            selected_paths.extend(paths);
+        } else if toggle && !selected_paths.insert(path.clone()) {
+            selected_paths.remove(&path);
+        } else {
+            selected_paths.insert(path.clone());
+        }
+
+        let remains_selected = selected_paths.contains(&path);
+        self.set_selected_paths(selected_paths);
+        self.selection_anchor = Some(path.clone());
+        self.batch_draft_revision = self.batch_draft_revision.wrapping_add(1);
+        self.mixed_fields.clear();
+        self.covers_mixed = false;
+        if remains_selected {
+            self.set_selected_path(Some(path));
+            true
+        } else if self.selected_path.as_deref() == Some(path.as_path()) {
+            let next_focus = self
+                .tree
+                .as_ref()
+                .map(|tree| tree.flatten(&self.expanded_paths))
+                .and_then(|rows| {
+                    rows.into_iter()
+                        .find(|row| !row.is_directory && self.selected_paths.contains(&row.path))
+                        .map(|row| row.path)
+                });
+            if let Some(next_focus) = next_focus {
+                self.set_selected_path(Some(next_focus));
+                true
+            } else {
+                self.selected_file = None;
+                self.inspector_visible = false;
+                self.selected_path = None;
+                self.original_draft = None;
+                self.active_draft = TagDraft::default();
+                self.cover_error = None;
+                self.cover_revision = self.cover_revision.wrapping_add(1);
+                self.draft_revision = self.draft_revision.wrapping_add(1);
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    fn load_batch_drafts(&self, sender: ComponentSender<Self>) {
+        if self.selected_paths.len() < 2 {
+            return;
+        }
+        let paths = self.selected_paths.clone();
+        let root = self.root_directory.clone().unwrap_or_default();
+        let selection_revision = self.selection_revision;
+        let batch_draft_revision = self.batch_draft_revision;
+        sender.spawn_oneshot_command(move || {
+            let drafts = paths
+                .iter()
+                .filter_map(|path| read_audio_file(path.clone(), root.clone()).ok())
+                .map(|file| TagDraft::from_audio_file(&file))
+                .collect();
+            CmdMsg::BatchDraftsLoaded {
+                paths,
+                drafts,
+                selection_revision,
+                batch_draft_revision,
+            }
+        });
+    }
+
+    fn set_selected_paths(&mut self, selected_paths: BTreeSet<PathBuf>) {
+        let previous = std::mem::replace(&mut self.selected_paths, selected_paths);
         let changed_rows = self
             .tree_rows
             .iter()
             .enumerate()
             .filter_map(|(index, row)| {
-                let is_selected = path.as_deref() == Some(row.path());
-                let was_selected = previous.as_deref() == Some(row.path());
+                let is_selected = self.selected_paths.contains(row.path());
+                let was_selected = previous.contains(row.path());
                 (is_selected != was_selected).then_some((index, is_selected))
             })
             .collect::<Vec<_>>();
@@ -336,30 +642,139 @@ impl AppModel {
         }
     }
 
+    fn set_selected_path(&mut self, path: Option<PathBuf>) {
+        self.selected_path = path;
+    }
+
     fn schedule_save(&mut self, sender: ComponentSender<Self>) {
         let Some(file) = self.selected_file.as_ref() else {
             return;
         };
         if let Some(pending) = self.pending_save.take() {
-            pending.source.remove();
+            if let Some(source) = pending.source {
+                source.remove();
+            }
         }
+        self.pending_batch_save = None;
         let path = file.path.clone();
         let save_sender = sender.clone();
         let source = glib::timeout_add_local_once(Duration::from_millis(500), move || {
             save_sender.input(AppMsg::SaveNow);
         });
-        self.pending_save = Some(PendingSave { source, path });
+        self.pending_save = Some(PendingSave {
+            source: Some(source),
+            path,
+        });
+    }
+
+    fn stage_batch_field(&mut self, field: TagField, value: String) {
+        let pending = self
+            .pending_batch_save
+            .get_or_insert_with(|| PendingBatchSave {
+                paths: self.selected_paths.iter().cloned().collect(),
+                fields: HashMap::new(),
+                cover: None,
+            });
+        pending.fields.insert(field, value);
+    }
+
+    fn stage_batch_cover(&mut self, cover: CoverDraft) {
+        let pending = self
+            .pending_batch_save
+            .get_or_insert_with(|| PendingBatchSave {
+                paths: self.selected_paths.iter().cloned().collect(),
+                fields: HashMap::new(),
+                cover: None,
+            });
+        pending.cover = Some(cover);
+    }
+
+    fn save_batch(&mut self, sender: ComponentSender<Self>) {
+        if self.batch_save_in_progress {
+            return;
+        }
+        let Some(pending) = self.pending_batch_save.take() else {
+            return;
+        };
+        if pending.is_empty() || pending.paths.len() < 2 {
+            return;
+        }
+        if pending.fields.iter().any(|(&field, value)| {
+            TagDraft::default()
+                .with_field(field, value.clone())
+                .validation_error(field)
+                .is_some()
+        }) {
+            self.status = "请先修正表单中的无效字段。".into();
+            self.pending_batch_save = Some(pending);
+            return;
+        }
+        let Some(root) = self.root_directory.clone() else {
+            return;
+        };
+        self.batch_save_in_progress = true;
+        self.status = format!("正在批量保存 {} 个文件…", pending.paths.len());
+        sender.spawn_oneshot_command(move || {
+            let mut files = Vec::new();
+            let mut snapshots = Vec::new();
+            let result = pending.paths.iter().cloned().try_for_each(|path| {
+                let file = match read_audio_file(path.clone(), root.clone()) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        rollback_history_batch(&snapshots)?;
+                        return Err(error);
+                    }
+                };
+                let mut draft = TagDraft::from_audio_file(&file);
+                for (field, value) in &pending.fields {
+                    draft.set(*field, value.clone());
+                }
+                if let Some(cover) = &pending.cover {
+                    draft.cover = cover.clone();
+                }
+                let snapshot = match create_backup(&root, &path) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        rollback_history_batch(&snapshots)?;
+                        return Err(error);
+                    }
+                };
+                snapshots.push((path.clone(), snapshot));
+                if let Err(error) = write_draft(&path, &draft) {
+                    rollback_history_batch(&snapshots)?;
+                    return Err(error);
+                }
+                match read_audio_file(path.clone(), root.clone()) {
+                    Ok(file) => {
+                        files.push(file);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        rollback_history_batch(&snapshots)?;
+                        Err(error)
+                    }
+                }
+            });
+            CmdMsg::BatchSaveFinished {
+                result: Box::new(result.map(|_| files)),
+                batch: HistoryBatch { snapshots },
+                pending,
+            }
+        });
     }
 
     fn save_current(&mut self, sender: ComponentSender<Self>) {
         if self.save_in_progress {
             return;
         }
-        let Some(pending) = self.pending_save.take() else {
+        let Some(mut pending) = self.pending_save.take() else {
             return;
         };
+        pending.source = None;
         if !self.active_draft.is_valid() {
             self.status = "请先修正表单中的无效字段。".into();
+            self.pending_save = Some(pending);
+            self.quitting = false;
             return;
         }
         let (Some(file), Some(root)) = (&self.selected_file, &self.root_directory) else {
@@ -384,11 +799,13 @@ impl AppModel {
                     result: Box::new(Ok(file)),
                     snapshot: Some(snapshot),
                     draft: draft.clone(),
+                    pending,
                 },
                 Err(error) => CmdMsg::SaveFinished {
                     result: Box::new(Err(error)),
                     snapshot: None,
                     draft,
+                    pending,
                 },
             }
         });
@@ -396,12 +813,52 @@ impl AppModel {
 
     fn finish_pending_action(&mut self, sender: ComponentSender<Self>) {
         match self.pending_action.take() {
-            Some(PendingAction::Select(path)) => sender.input(AppMsg::SelectAudioFile(path)),
+            Some(PendingAction::Select { path, modifiers }) => {
+                sender.input(AppMsg::SelectAudioFile { path, modifiers })
+            }
             Some(PendingAction::OpenDirectory(path)) => sender.input(AppMsg::DirectoryChosen(path)),
             Some(PendingAction::Undo) => sender.input(AppMsg::Undo),
             Some(PendingAction::Redo) => sender.input(AppMsg::Redo),
             None => {}
         }
+    }
+
+    fn show_close_dialog(&mut self, sender: ComponentSender<Self>, root: &gtk::Window) {
+        if self.close_dialog_open {
+            return;
+        }
+        self.close_dialog_open = true;
+        let dialog = adw::AlertDialog::builder()
+            .heading("保存更改？")
+            .body("关闭前有尚未保存的标签或封面更改。")
+            .prefer_wide_layout(true)
+            .close_response("cancel")
+            .build();
+        dialog.add_responses(&[("cancel", "取消"), ("discard", "不保存"), ("save", "保存")]);
+        dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+        dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("save"));
+        let dialog_sender = sender.clone();
+        dialog.connect_response(None, move |_, response| {
+            let action = match response {
+                "discard" => CloseAction::Discard,
+                "save" => CloseAction::Save,
+                _ => CloseAction::Cancel,
+            };
+            dialog_sender.input(AppMsg::CloseAction(action));
+        });
+        dialog.present(Some(root));
+    }
+
+    fn discard_changes_and_close(&mut self, sender: ComponentSender<Self>, root: &gtk::Window) {
+        if let Some(pending) = self.pending_save.take()
+            && let Some(source) = pending.source
+        {
+            source.remove();
+        }
+        self.pending_batch_save = None;
+        self.quitting = true;
+        self.finish_close(sender, root);
     }
 
     fn finish_close(&mut self, sender: ComponentSender<Self>, root: &gtk::Window) {
@@ -429,6 +886,8 @@ impl Component for AppModel {
         status_label: gtk::Label,
         undo_button: gtk::Button,
         redo_button: gtk::Button,
+        save_button: gtk::Button,
+        batch_save_warning: gtk::Image,
         editor_cover: Rc<RefCell<EditorCoverTransition>>,
     }
 
@@ -458,6 +917,8 @@ impl Component for AppModel {
                     set_width_request: 290,
                     set_margin_all: 0,
                     gtk::ScrolledWindow {
+                        #[watch]
+                        set_sensitive: !model.is_saving(),
                         set_vexpand: true,
                         #[local_ref]
                         tree_box -> gtk::Box {
@@ -491,16 +952,27 @@ impl Component for AppModel {
                             set_margin_all: 20,
                             #[watch]
                             set_visible: model.selected_file.is_some(),
+                            #[watch]
+                            set_sensitive: !model.is_saving(),
                             gtk::Label {
                                 #[watch]
-                                set_label: &model.selected_path(),
+                                set_label: &model.selection_summary(),
                                 set_halign: gtk::Align::Start,
                                 add_css_class: "title-4",
                             },
-                            gtk::Label { set_label: " " },
+                            gtk::Label {
+                                set_label: "编辑任一字段会仅更新该字段，并应用到所有已选文件。",
+                                set_halign: gtk::Align::Start,
+                                add_css_class: "dim-label",
+                                #[watch]
+                                set_visible: model.is_batch_editing(),
+                            },
+                            gtk::Label { set_label: " ", #[watch] set_visible: !model.is_batch_editing() },
                             gtk::Label { set_label: "标题", set_halign: gtk::Align::Start },
                             #[name = "title_entry"]
                             gtk::Entry {
+                                #[watch]
+                                set_placeholder_text: Some(model.field_placeholder(TagField::Title)),
                                 connect_changed[sender, syncing] => move |entry| {
                                     if !syncing.get() { sender.input(AppMsg::SetField(TagField::Title, entry.text().to_string())); }
                                 },
@@ -516,6 +988,8 @@ impl Component for AppModel {
                             gtk::Label { set_label: "艺人", set_halign: gtk::Align::Start },
                             #[name = "artist_entry"]
                             gtk::Entry {
+                                #[watch]
+                                set_placeholder_text: Some(model.field_placeholder(TagField::Artist)),
                                 connect_changed[sender, syncing] => move |entry| {
                                     if !syncing.get() { sender.input(AppMsg::SetField(TagField::Artist, entry.text().to_string())); }
                                 },
@@ -524,6 +998,8 @@ impl Component for AppModel {
                             gtk::Label { set_label: "专辑", set_halign: gtk::Align::Start },
                             #[name = "album_entry"]
                             gtk::Entry {
+                                #[watch]
+                                set_placeholder_text: Some(model.field_placeholder(TagField::Album)),
                                 connect_changed[sender, syncing] => move |entry| {
                                     if !syncing.get() { sender.input(AppMsg::SetField(TagField::Album, entry.text().to_string())); }
                                 },
@@ -532,6 +1008,8 @@ impl Component for AppModel {
                             gtk::Label { set_label: "专辑艺人", set_halign: gtk::Align::Start },
                             #[name = "album_artist_entry"]
                             gtk::Entry {
+                                #[watch]
+                                set_placeholder_text: Some(model.field_placeholder(TagField::AlbumArtist)),
                                 connect_changed[sender, syncing] => move |entry| {
                                     if !syncing.get() { sender.input(AppMsg::SetField(TagField::AlbumArtist, entry.text().to_string())); }
                                 },
@@ -540,6 +1018,8 @@ impl Component for AppModel {
                             gtk::Label { set_label: "年份", set_halign: gtk::Align::Start },
                             #[name = "year_entry"]
                             gtk::Entry {
+                                #[watch]
+                                set_placeholder_text: Some(model.field_placeholder(TagField::Year)),
                                 connect_changed[sender, syncing] => move |entry| {
                                     if !syncing.get() { sender.input(AppMsg::SetField(TagField::Year, entry.text().to_string())); }
                                 },
@@ -548,6 +1028,8 @@ impl Component for AppModel {
                             gtk::Label { set_label: "曲目号", set_halign: gtk::Align::Start },
                             #[name = "track_entry"]
                             gtk::Entry {
+                                #[watch]
+                                set_placeholder_text: Some(model.field_placeholder(TagField::TrackNumber)),
                                 connect_changed[sender, syncing] => move |entry| {
                                     if !syncing.get() { sender.input(AppMsg::SetField(TagField::TrackNumber, entry.text().to_string())); }
                                 },
@@ -556,6 +1038,8 @@ impl Component for AppModel {
                             gtk::Label { set_label: "碟号", set_halign: gtk::Align::Start },
                             #[name = "disc_entry"]
                             gtk::Entry {
+                                #[watch]
+                                set_placeholder_text: Some(model.field_placeholder(TagField::DiscNumber)),
                                 connect_changed[sender, syncing] => move |entry| {
                                     if !syncing.get() { sender.input(AppMsg::SetField(TagField::DiscNumber, entry.text().to_string())); }
                                 },
@@ -564,6 +1048,8 @@ impl Component for AppModel {
                             gtk::Label { set_label: "流派", set_halign: gtk::Align::Start },
                             #[name = "genre_entry"]
                             gtk::Entry {
+                                #[watch]
+                                set_placeholder_text: Some(model.field_placeholder(TagField::Genre)),
                                 connect_changed[sender, syncing] => move |entry| {
                                     if !syncing.get() { sender.input(AppMsg::SetField(TagField::Genre, entry.text().to_string())); }
                                 },
@@ -590,7 +1076,7 @@ impl Component for AppModel {
                         set_width_request: 310,
                         set_margin_all: 16,
                         #[watch]
-                        set_sensitive: model.selected_file.is_some(),
+                        set_sensitive: model.selected_file.is_some() && !model.is_saving(),
                         gtk::Label { set_label: "元信息与封面", set_halign: gtk::Align::Start, add_css_class: "title-4" },
                         gtk::Box {
                             set_spacing: 8,
@@ -692,6 +1178,10 @@ impl Component for AppModel {
             expanded_paths: Vec::new(),
             selected_file: None,
             selected_path: None,
+            selected_paths: BTreeSet::new(),
+            mixed_fields: std::collections::HashSet::new(),
+            covers_mixed: false,
+            selection_anchor: None,
             sidebar_visible: false,
             inspector_visible: false,
             original_draft: None,
@@ -700,6 +1190,8 @@ impl Component for AppModel {
             status: "选择一个音乐目录以开始浏览。".into(),
             cover_error: None,
             tree_revision: 0,
+            selection_revision: 0,
+            batch_draft_revision: 0,
             tree_rows: FactoryVecDeque::builder()
                 .launch(
                     gtk::Box::builder()
@@ -711,11 +1203,14 @@ impl Component for AppModel {
             album_cover_textures: album_cover_textures.clone(),
             blurred_cover_cache: RefCell::new(BlurredCoverCache::default()),
             cover_revision: 0,
-            histories: HashMap::new(),
+            history: BatchHistory::default(),
             pending_save: None,
+            pending_batch_save: None,
             save_in_progress: false,
+            batch_save_in_progress: false,
             pending_action: None,
             quitting: false,
+            close_dialog_open: false,
             draft_revision: 0,
         };
         let syncing = Rc::new(Cell::new(false));
@@ -770,7 +1265,8 @@ impl Component for AppModel {
              .file-tree-row:focus { box-shadow: none; outline: none; }\
              .regular-file { font-weight: normal; }\
              .tree-thumbnail, .album-thumbnail { min-width: 24px; min-height: 24px; border-radius: 4px; }\
-             .editor-cover-background { opacity: 0.2; }",
+             .editor-cover-background { opacity: 0.2; }\
+             .batch-save-warning { color: #e5a50a; }",
         );
         if let Some(display) = gdk::Display::default() {
             gtk::style_context_add_provider_for_display(
@@ -797,6 +1293,23 @@ impl Component for AppModel {
         let redo_sender = sender.clone();
         redo_button.connect_clicked(move |_| redo_sender.input(AppMsg::Redo));
         header_bar.pack_end(&redo_button);
+
+        let save_button = gtk::Button::builder()
+            .icon_name("document-save-symbolic")
+            .tooltip_text("保存")
+            .sensitive(false)
+            .build();
+        let save_sender = sender.clone();
+        save_button.connect_clicked(move |_| save_sender.input(AppMsg::SaveNow));
+        header_bar.pack_end(&save_button);
+
+        let batch_save_warning = gtk::Image::builder()
+            .icon_name("dialog-warning-symbolic")
+            .tooltip_text("批量编辑尚未保存")
+            .visible(false)
+            .build();
+        batch_save_warning.add_css_class("batch-save-warning");
+        header_bar.pack_end(&batch_save_warning);
 
         let status_label = gtk::Label::builder()
             .label(model.header_title())
@@ -878,6 +1391,14 @@ impl Component for AppModel {
         match msg {
             AppMsg::ChooseDirectory => choose_directory(root, sender),
             AppMsg::DirectoryChosen(path) => {
+                if self.is_saving() {
+                    self.status = "正在保存标签，请稍后再切换目录。".into();
+                    return;
+                }
+                if self.pending_batch_save.is_some() {
+                    self.status = "批量编辑尚未保存，请先点击保存按钮。".into();
+                    return;
+                }
                 if self.pending_save.is_some() || self.save_in_progress {
                     self.pending_action = Some(PendingAction::OpenDirectory(path));
                     self.save_current(sender);
@@ -888,29 +1409,52 @@ impl Component for AppModel {
                 self.root_directory = Some(path.clone());
                 self.tree = None;
                 self.expanded_paths.clear();
-                self.histories.clear();
+                self.history = BatchHistory::default();
                 self.tree_revision = self.tree_revision.wrapping_add(1);
                 self.clear_selection();
-                sender.spawn_oneshot_command(move || {
-                    CmdMsg::DirectoryScanned(scan_directory(path.clone()), path)
+                let revision = self.tree_revision;
+                sender.spawn_oneshot_command(move || CmdMsg::DirectoryScanned {
+                    result: scan_directory(path.clone()),
+                    path,
+                    revision,
                 });
             }
 
-            AppMsg::SelectAudioFile(path) => {
+            AppMsg::SelectAudioFile { path, modifiers } => {
+                if self.is_saving() {
+                    self.status = "正在保存标签，请稍后再选择文件。".into();
+                    return;
+                }
+                if self.pending_batch_save.is_some() {
+                    self.status = "批量编辑尚未保存，请先点击保存按钮。".into();
+                    return;
+                }
                 if self.selected_path.as_deref() != Some(path.as_path())
                     && (self.pending_save.is_some() || self.save_in_progress)
                 {
-                    self.pending_action = Some(PendingAction::Select(path));
+                    self.pending_action = Some(PendingAction::Select { path, modifiers });
                     self.save_current(sender);
                     return;
                 }
-                self.set_selected_path(Some(path.clone()));
+                if !self.select_audio_file(path, modifiers) {
+                    return;
+                }
+                self.selection_revision = self.selection_revision.wrapping_add(1);
+                if self.is_batch_editing() {
+                    self.load_batch_drafts(sender.clone());
+                }
+                let revision = self.selection_revision;
+                let Some(path) = self.selected_path.clone() else {
+                    return;
+                };
                 let Some(root_path) = self.root_directory.clone() else {
                     return;
                 };
                 self.status = format!("正在读取 {}…", path.display());
-                sender.spawn_oneshot_command(move || {
-                    CmdMsg::AudioLoaded(Box::new(read_audio_file(path, root_path)))
+                sender.spawn_oneshot_command(move || CmdMsg::AudioLoaded {
+                    result: Box::new(read_audio_file(path.clone(), root_path)),
+                    path,
+                    revision,
                 });
             }
             AppMsg::SetSidebarVisible(visible) => self.sidebar_visible = visible,
@@ -925,16 +1469,34 @@ impl Component for AppModel {
             }
             AppMsg::TreeRow(output) => match output {
                 ui::tree_row::TreeRowOutput::ToggleDirectory(path) => self.toggle_directory(&path),
-                ui::tree_row::TreeRowOutput::SelectAudioFile(path) => {
-                    sender.input(AppMsg::SelectAudioFile(path))
+                ui::tree_row::TreeRowOutput::SelectAudioFile { path, modifiers } => {
+                    sender.input(AppMsg::SelectAudioFile { path, modifiers });
                 }
             },
             AppMsg::SetField(field, value) => {
-                self.active_draft.set(field, value);
-                self.schedule_save(sender);
+                if self.is_batch_editing() {
+                    self.batch_draft_revision = self.batch_draft_revision.wrapping_add(1);
+                    self.active_draft.set(field, value.clone());
+                    self.mixed_fields.remove(&field);
+                    self.draft_revision = self.draft_revision.wrapping_add(1);
+                    self.stage_batch_field(field, value);
+                } else {
+                    self.active_draft.set(field, value);
+                    self.schedule_save(sender);
+                }
             }
-            AppMsg::SaveNow => self.save_current(sender),
+            AppMsg::SaveNow => {
+                if self.is_batch_editing() {
+                    self.save_batch(sender);
+                } else {
+                    self.save_current(sender);
+                }
+            }
             AppMsg::Undo | AppMsg::Redo => {
+                if self.is_saving() || self.pending_batch_save.is_some() {
+                    self.status = "保存完成前无法撤销或重做。".into();
+                    return;
+                }
                 let is_undo = matches!(msg, AppMsg::Undo);
                 if self.pending_save.is_some() || self.save_in_progress {
                     self.pending_action = Some(if is_undo {
@@ -945,52 +1507,50 @@ impl Component for AppModel {
                     self.save_current(sender);
                     return;
                 }
-                let (Some(file), Some(root)) = (&self.selected_file, &self.root_directory) else {
+                let Some(root) = self.root_directory.clone() else {
                     return;
                 };
-                let history = self.histories.entry(file.path.clone()).or_default();
-                let snapshot = if is_undo {
-                    history.undo.pop()
+                let Some(batch) = self.history.take(&self.selected_paths, is_undo) else {
+                    self.status = "当前选择与最近的批量历史不匹配。".into();
+                    return;
+                };
+                self.batch_save_in_progress = true;
+                self.status = if is_undo {
+                    format!("正在撤销 {} 个文件…", batch.snapshots.len())
                 } else {
-                    history.redo.pop()
+                    format!("正在重做 {} 个文件…", batch.snapshots.len())
                 };
-                let Some(snapshot) = snapshot else {
-                    return;
-                };
-                let source = file.path.clone();
-                let root = root.clone();
                 sender.spawn_oneshot_command(move || {
-                    let result = create_backup(&root, &source).and_then(|current_snapshot| {
-                        restore_snapshot(&source, &snapshot.path)
-                            .and_then(|_| read_audio_file(source.clone(), root))
-                            .map(|file| (file, current_snapshot))
-                    });
-                    match result {
-                        Ok((file, current_snapshot)) => CmdMsg::HistoryRestored {
-                            result: Box::new(Ok(file)),
-                            current_snapshot,
-                            restored_snapshot: snapshot,
-                            is_undo,
-                        },
-                        Err(error) => CmdMsg::HistoryRestored {
-                            result: Box::new(Err(error)),
-                            current_snapshot: BackupVersion {
-                                timestamp: String::new(),
-                                path: PathBuf::new(),
-                                size_bytes: 0,
-                            },
-                            restored_snapshot: snapshot,
-                            is_undo,
-                        },
+                    let result = restore_history_batch(&root, &batch);
+                    CmdMsg::HistoryBatchRestored {
+                        batch,
+                        result: Box::new(result),
+                        is_undo,
                     }
                 });
             }
             AppMsg::RequestClose => {
-                self.quitting = true;
-                if self.pending_save.is_some() || self.save_in_progress {
-                    self.save_current(sender);
+                if self.is_saving() {
+                    self.status = "正在保存标签，完成后才能关闭窗口。".into();
+                } else if self.has_pending_save() {
+                    self.show_close_dialog(sender, root);
                 } else {
-                    self.finish_close(sender, root);
+                    self.discard_changes_and_close(sender, root);
+                }
+            }
+            AppMsg::CloseAction(action) => {
+                self.close_dialog_open = false;
+                match action {
+                    CloseAction::Cancel => {}
+                    CloseAction::Discard => self.discard_changes_and_close(sender, root),
+                    CloseAction::Save => {
+                        self.quitting = true;
+                        if self.is_batch_editing() {
+                            self.save_batch(sender);
+                        } else {
+                            self.save_current(sender);
+                        }
+                    }
                 }
             }
             AppMsg::ShowAbout => {
@@ -1016,56 +1576,96 @@ impl Component for AppModel {
                     .and_then(|reader| reader.decode().ok())
                     .is_some()
                 {
-                    self.active_draft.cover = CoverDraft::External(path);
+                    let cover = CoverDraft::External(path);
                     self.cover_error = None;
-                    self.cover_revision = self.cover_revision.wrapping_add(1);
-                    self.schedule_save(sender);
+                    if self.is_batch_editing() {
+                        self.batch_draft_revision = self.batch_draft_revision.wrapping_add(1);
+                        self.active_draft.cover = cover.clone();
+                        self.covers_mixed = false;
+                        self.cover_revision = self.cover_revision.wrapping_add(1);
+                        self.stage_batch_cover(cover);
+                    } else {
+                        self.active_draft.cover = cover;
+                        self.cover_revision = self.cover_revision.wrapping_add(1);
+                        self.schedule_save(sender);
+                    }
                 } else {
                     self.cover_error = Some("请选择有效的图片文件。".into());
                 }
             }
             AppMsg::RemoveCover => {
-                self.active_draft.cover = CoverDraft::Removed;
-                self.cover_revision = self.cover_revision.wrapping_add(1);
-                self.schedule_save(sender);
+                if self.is_batch_editing() {
+                    self.batch_draft_revision = self.batch_draft_revision.wrapping_add(1);
+                    self.active_draft.cover = CoverDraft::Removed;
+                    self.covers_mixed = false;
+                    self.cover_revision = self.cover_revision.wrapping_add(1);
+                    self.stage_batch_cover(CoverDraft::Removed);
+                } else {
+                    self.active_draft.cover = CoverDraft::Removed;
+                    self.cover_revision = self.cover_revision.wrapping_add(1);
+                    self.schedule_save(sender);
+                }
             }
         }
     }
 
     fn update_cmd(&mut self, msg: CmdMsg, sender: ComponentSender<Self>, _root: &Self::Root) {
         match msg {
-            CmdMsg::DirectoryScanned(result, path) => match result {
-                Ok(Some(tree)) => {
-                    self.expanded_paths = tree.album_directory_paths();
-                    if !self.expanded_paths.iter().any(|expanded| expanded == &path) {
-                        self.expanded_paths.push(path);
+            CmdMsg::DirectoryScanned {
+                result,
+                path,
+                revision,
+            } => {
+                if revision != self.tree_revision
+                    || self.root_directory.as_deref() != Some(path.as_path())
+                {
+                    return;
+                }
+                match result {
+                    Ok(Some(tree)) => {
+                        self.expanded_paths = tree.album_directory_paths();
+                        if !self.expanded_paths.iter().any(|expanded| expanded == &path) {
+                            self.expanded_paths.push(path);
+                        }
+                        self.tree = Some(tree);
+                        self.sync_tree_rows();
+                        self.status = "目录扫描完成。选择一个音频文件以编辑其内存草稿。".into();
                     }
-                    self.tree = Some(tree);
-                    self.sync_tree_rows();
-                    self.status = "目录扫描完成。选择一个音频文件以编辑其内存草稿。".into();
+                    Ok(None) => self.status = "该目录及其子目录中没有受支持的音频文件。".into(),
+                    Err(error) => self.status = error,
                 }
-                Ok(None) => self.status = "该目录及其子目录中没有受支持的音频文件。".into(),
-                Err(error) => self.status = error,
-            },
-            CmdMsg::AudioLoaded(result) => match *result {
-                Ok(file) => self.load_file(file, "正在编辑 {}。"),
-                Err(error) => {
-                    self.clear_selection();
-                    self.status = error;
+            }
+            CmdMsg::AudioLoaded {
+                result,
+                path,
+                revision,
+            } => {
+                if revision != self.selection_revision
+                    || self.selected_path.as_deref() != Some(path.as_path())
+                {
+                    return;
                 }
-            },
+                match *result {
+                    Ok(file) => self.load_file(file, "正在编辑 {}。"),
+                    Err(error) => {
+                        self.clear_selection();
+                        self.status = error;
+                    }
+                }
+            }
             CmdMsg::SaveFinished {
                 result,
                 snapshot,
                 draft,
+                pending,
             } => {
                 self.save_in_progress = false;
                 match *result {
                     Ok(file) => {
                         if let Some(snapshot) = snapshot {
-                            let history = self.histories.entry(file.path.clone()).or_default();
-                            history.undo.push(snapshot);
-                            history.redo.clear();
+                            self.history.record_save(HistoryBatch {
+                                snapshots: vec![(file.path.clone(), snapshot)],
+                            });
                         }
                         if self.active_draft == draft {
                             self.load_file(file, "已自动保存。");
@@ -1081,46 +1681,94 @@ impl Component for AppModel {
                         }
                     }
                     Err(error) => {
+                        self.pending_save = Some(pending);
                         self.status = error;
                         self.quitting = false;
                     }
                 }
             }
-            CmdMsg::HistoryRestored {
+            CmdMsg::BatchDraftsLoaded {
+                paths,
+                drafts,
+                selection_revision,
+                batch_draft_revision,
+            } => {
+                if is_current_batch_draft_result(
+                    &paths,
+                    selection_revision,
+                    batch_draft_revision,
+                    &self.selected_paths,
+                    self.selection_revision,
+                    self.batch_draft_revision,
+                ) && !drafts.is_empty()
+                {
+                    let (draft, mixed_fields, covers_mixed) = common_draft(&drafts);
+                    self.active_draft = draft;
+                    self.mixed_fields = mixed_fields;
+                    self.covers_mixed = covers_mixed;
+                    self.cover_revision = self.cover_revision.wrapping_add(1);
+                    self.draft_revision = self.draft_revision.wrapping_add(1);
+                }
+            }
+            CmdMsg::BatchSaveFinished {
                 result,
-                current_snapshot,
-                restored_snapshot,
-                is_undo,
-            } => match *result {
-                Ok(file) => {
-                    let history = self.histories.entry(file.path.clone()).or_default();
-                    if is_undo {
-                        history.redo.push(current_snapshot);
-                    } else {
-                        history.undo.push(current_snapshot);
-                    }
-                    self.load_file(
-                        file,
-                        if is_undo {
-                            "已撤销。"
+                batch,
+                pending,
+            } => {
+                self.batch_save_in_progress = false;
+                match *result {
+                    Ok(files) => {
+                        let saved = files.len();
+                        self.history.record_save(batch);
+                        if let Some(file) = files
+                            .into_iter()
+                            .find(|file| self.selected_path.as_deref() == Some(file.path.as_path()))
+                        {
+                            self.selected_file = Some(file);
+                        }
+                        self.status = format!("已批量保存 {saved} 个文件。");
+                        if self.quitting {
+                            self.finish_close(sender, _root);
                         } else {
-                            "已重做。"
-                        },
-                    );
-                }
-                Err(error) => {
-                    let history = self
-                        .histories
-                        .entry(self.selected_path.clone().unwrap_or_default())
-                        .or_default();
-                    if is_undo {
-                        history.undo.push(restored_snapshot);
-                    } else {
-                        history.redo.push(restored_snapshot);
+                            self.load_batch_drafts(sender);
+                        }
                     }
-                    self.status = error;
+                    Err(error) => {
+                        self.pending_batch_save = Some(pending);
+                        self.status = error;
+                        self.quitting = false;
+                    }
                 }
-            },
+            }
+            CmdMsg::HistoryBatchRestored {
+                batch,
+                result,
+                is_undo,
+            } => {
+                self.batch_save_in_progress = false;
+                match *result {
+                    Ok((files, current_batch)) => {
+                        let restored = files.len();
+                        self.history.complete_restore(current_batch, is_undo);
+                        if let Some(file) = files
+                            .into_iter()
+                            .find(|file| self.selected_path.as_deref() == Some(file.path.as_path()))
+                        {
+                            self.selected_file = Some(file);
+                        }
+                        self.status = if is_undo {
+                            format!("已撤销 {restored} 个文件。")
+                        } else {
+                            format!("已重做 {restored} 个文件。")
+                        };
+                        self.load_batch_drafts(sender);
+                    }
+                    Err(error) => {
+                        self.history.restore_failed(batch, is_undo);
+                        self.status = error;
+                    }
+                }
+            }
             CmdMsg::BackupsCleared(result) => match result {
                 Ok(()) => _root.destroy(),
                 Err(error) => {
@@ -1135,8 +1783,11 @@ impl Component for AppModel {
         status_label.set_label(&model.header_title());
         sidebar_button.set_sensitive(model.root_directory.is_some());
         sidebar_button.set_active(model.sidebar_visible);
-        inspector_button.set_sensitive(model.selected_file.is_some());
+        inspector_button.set_sensitive(model.selected_file.is_some() && !model.is_saving());
         inspector_button.set_active(model.inspector_visible);
+        save_button.set_sensitive(model.has_pending_save() && !model.is_saving());
+        batch_save_warning
+            .set_visible(model.is_batch_editing() && model.pending_batch_save.is_some());
 
         if rendered_cover_revision.replace(model.cover_revision) != model.cover_revision {
             cover_dimensions.set_label(&update_cover(cover, &model.active_draft.cover));
@@ -1147,12 +1798,10 @@ impl Component for AppModel {
                 &model.active_draft.cover,
             );
         }
-        let history = model
-            .selected_file
-            .as_ref()
-            .and_then(|file| model.histories.get(&file.path));
-        undo_button.set_sensitive(history.is_some_and(|history| !history.undo.is_empty()));
-        redo_button.set_sensitive(history.is_some_and(|history| !history.redo.is_empty()));
+        let can_undo = model.history.can_undo(&model.selected_paths);
+        let can_redo = model.history.can_redo(&model.selected_paths);
+        undo_button.set_sensitive(can_undo && !model.is_saving());
+        redo_button.set_sensitive(can_redo && !model.is_saving());
         if rendered_draft_revision.replace(model.draft_revision) != model.draft_revision {
             syncing.set(true);
             sync_entry(title_entry, &model.active_draft.title);
@@ -1165,6 +1814,118 @@ impl Component for AppModel {
             sync_entry(genre_entry, &model.active_draft.genre);
             syncing.set(false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_history_moves_complete_batch_between_undo_and_redo() {
+        let first = PathBuf::from("first.flac");
+        let second = PathBuf::from("second.flac");
+        let selected = BTreeSet::from([first.clone(), second.clone()]);
+        let mut history = BatchHistory::default();
+        let batch = HistoryBatch {
+            snapshots: vec![
+                (first, backup("first-before.flac")),
+                (second, backup("second-before.flac")),
+            ],
+        };
+
+        history.redo.push(HistoryBatch {
+            snapshots: vec![(PathBuf::from("stale.flac"), backup("stale.flac"))],
+        });
+        history.record_save(batch);
+
+        assert!(history.redo.is_empty());
+        assert!(history.can_undo(&selected));
+        let undo_batch = history.take(&selected, true).expect("undo batch");
+        assert!(history.undo.is_empty());
+        history.complete_restore(undo_batch, true);
+        assert!(history.can_redo(&selected));
+    }
+
+    #[test]
+    fn failed_batch_restore_returns_the_batch_to_its_original_stack() {
+        let path = PathBuf::from("track.flac");
+        let selected = BTreeSet::from([path.clone()]);
+        let batch = HistoryBatch {
+            snapshots: vec![(path, backup("before.flac"))],
+        };
+        let mut history = BatchHistory::default();
+        history.record_save(batch);
+        let in_flight = history.take(&selected, true).expect("undo batch");
+
+        history.restore_failed(in_flight, true);
+
+        assert!(history.can_undo(&selected));
+        assert!(history.redo.is_empty());
+    }
+
+    #[test]
+    fn batch_draft_result_rejects_stale_edit_revision() {
+        let paths = BTreeSet::from([PathBuf::from("first.flac"), PathBuf::from("second.flac")]);
+
+        assert!(!is_current_batch_draft_result(&paths, 3, 4, &paths, 3, 5));
+        assert!(!is_current_batch_draft_result(&paths, 2, 5, &paths, 3, 5));
+        assert!(is_current_batch_draft_result(&paths, 3, 5, &paths, 3, 5));
+    }
+
+    fn backup(path: &str) -> BackupVersion {
+        BackupVersion {
+            timestamp: "now".into(),
+            path: PathBuf::from(path),
+            size_bytes: 1,
+        }
+    }
+
+    #[test]
+    fn canceling_close_keeps_pending_changes() {
+        let pending = PendingBatchSave {
+            paths: vec![PathBuf::from("track.flac")],
+            fields: HashMap::from([(TagField::Artist, "Changed".into())]),
+            cover: None,
+        };
+
+        assert!(!pending.is_empty());
+    }
+
+    #[test]
+    fn batch_undo_requires_an_exact_selection_match() {
+        let first = PathBuf::from("first.flac");
+        let second = PathBuf::from("second.flac");
+        let mut history = BatchHistory::default();
+        history.record_save(HistoryBatch {
+            snapshots: vec![
+                (
+                    first.clone(),
+                    BackupVersion {
+                        timestamp: "now".into(),
+                        path: PathBuf::from("first-backup.flac"),
+                        size_bytes: 1,
+                    },
+                ),
+                (
+                    second.clone(),
+                    BackupVersion {
+                        timestamp: "now".into(),
+                        path: PathBuf::from("second-backup.flac"),
+                        size_bytes: 1,
+                    },
+                ),
+            ],
+        });
+
+        assert!(!history.can_undo(&BTreeSet::from([first.clone()])));
+        assert!(
+            history
+                .take(&BTreeSet::from([first.clone()]), true)
+                .is_none()
+        );
+        assert_eq!(history.undo.len(), 1);
+        assert!(history.can_undo(&BTreeSet::from([first, second])));
     }
 }
 

@@ -1,8 +1,8 @@
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use super::AudioFile;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TagField {
     Title,
     Artist,
@@ -34,6 +34,43 @@ pub struct TagDraft {
     pub disc_number: String,
     pub genre: String,
     pub cover: CoverDraft,
+}
+
+pub const TAG_FIELDS: [TagField; 8] = [
+    TagField::Title,
+    TagField::Artist,
+    TagField::Album,
+    TagField::AlbumArtist,
+    TagField::Year,
+    TagField::TrackNumber,
+    TagField::DiscNumber,
+    TagField::Genre,
+];
+
+pub fn common_draft(drafts: &[TagDraft]) -> (TagDraft, HashSet<TagField>, bool) {
+    let Some(first) = drafts.first() else {
+        return (TagDraft::default(), HashSet::new(), false);
+    };
+    let mut common = first.clone();
+    let mut mixed_fields = HashSet::new();
+    for field in TAG_FIELDS {
+        if drafts
+            .iter()
+            .skip(1)
+            .any(|draft| draft.value(field) != first.value(field))
+        {
+            common.set(field, String::new());
+            mixed_fields.insert(field);
+        }
+    }
+    let covers_mixed = drafts
+        .iter()
+        .skip(1)
+        .any(|draft| draft.cover != first.cover);
+    if covers_mixed {
+        common.cover = CoverDraft::Unavailable;
+    }
+    (common, mixed_fields, covers_mixed)
 }
 
 impl TagDraft {
@@ -107,6 +144,24 @@ impl TagDraft {
         .all(|field| self.validation_error(field).is_none())
     }
 
+    pub fn value(&self, field: TagField) -> &str {
+        match field {
+            TagField::Title => &self.title,
+            TagField::Artist => &self.artist,
+            TagField::Album => &self.album,
+            TagField::AlbumArtist => &self.album_artist,
+            TagField::Year => &self.year,
+            TagField::TrackNumber => &self.track_number,
+            TagField::DiscNumber => &self.disc_number,
+            TagField::Genre => &self.genre,
+        }
+    }
+
+    pub fn with_field(mut self, field: TagField, value: String) -> Self {
+        self.set(field, value);
+        self
+    }
+
     pub fn set(&mut self, field: TagField, value: String) {
         match field {
             TagField::Title => self.title = value,
@@ -141,6 +196,61 @@ mod tests {
             Some("请输入大于 0 的整数。")
         );
         assert!(!draft.is_valid());
+    }
+
+    #[test]
+    fn clears_mixed_fields_in_a_common_draft() {
+        let first = TagDraft {
+            title: "First".into(),
+            artist: "Shared".into(),
+            ..Default::default()
+        };
+        let second = TagDraft {
+            title: "Second".into(),
+            artist: "Shared".into(),
+            ..Default::default()
+        };
+
+        let (common, mixed, covers_mixed) = common_draft(&[first, second]);
+
+        assert_eq!(common.title, "");
+        assert_eq!(common.artist, "Shared");
+        assert!(mixed.contains(&TagField::Title));
+        assert!(!mixed.contains(&TagField::Artist));
+        assert!(!covers_mixed);
+    }
+
+    #[test]
+    fn clears_a_mixed_cover_from_a_common_draft() {
+        let first = TagDraft {
+            cover: CoverDraft::Embedded(vec![1, 2, 3]),
+            ..Default::default()
+        };
+        let second = TagDraft {
+            cover: CoverDraft::Embedded(vec![4, 5, 6]),
+            ..Default::default()
+        };
+
+        let (common, _, covers_mixed) = common_draft(&[first, second]);
+
+        assert_eq!(common.cover, CoverDraft::Unavailable);
+        assert!(covers_mixed);
+    }
+
+    #[test]
+    fn cloning_with_a_field_preserves_unrelated_metadata() {
+        let draft = TagDraft {
+            title: "Original".into(),
+            artist: "Artist".into(),
+            cover: CoverDraft::Embedded(vec![1, 2, 3]),
+            ..Default::default()
+        };
+
+        let updated = draft.with_field(TagField::Title, "Updated".into());
+
+        assert_eq!(updated.title, "Updated");
+        assert_eq!(updated.artist, "Artist");
+        assert_eq!(updated.cover, CoverDraft::Embedded(vec![1, 2, 3]));
     }
 
     #[test]
