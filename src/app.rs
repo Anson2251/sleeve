@@ -8,9 +8,10 @@ use std::{
 
 use relm4::adw::prelude::*;
 use relm4::{
-    Component, ComponentParts, ComponentSender, RelmWidgetExt, adw,
+    Component, ComponentController, ComponentParts, ComponentSender, Controller, RelmWidgetExt,
+    adw,
     factory::FactoryVecDeque,
-    gtk::{self, gdk, gio},
+    gtk::{self, gdk},
 };
 
 use crate::{
@@ -25,9 +26,10 @@ use crate::{
 mod cover;
 mod dialogs;
 mod history;
+mod inspector;
 
 use cover::{
-    BlurredCoverCache, EditorCoverTransition, draw_cover, transition_progress, update_cover,
+    BlurredCoverCache, EditorCoverTransition, draw_cover, transition_progress,
     update_cover_background,
 };
 use dialogs::{choose_cover, choose_directory, sync_entry};
@@ -35,6 +37,7 @@ use history::{
     BatchHistory, HistoryBatch, is_current_batch_draft_result, restore_history_batch,
     rollback_history_batch,
 };
+use inspector::{InspectorComponent, InspectorInput, InspectorOutput, InspectorState};
 
 pub struct AppModel {
     root_directory: Option<PathBuf>,
@@ -69,6 +72,7 @@ pub struct AppModel {
     quitting: bool,
     close_dialog_open: bool,
     draft_revision: u64,
+    inspector: Controller<InspectorComponent>,
 }
 
 #[derive(Debug)]
@@ -222,30 +226,6 @@ impl AppModel {
             (true, false) => format!("Sleeve · {title}"),
             (false, false) => format!("Sleeve · {artist} · {title}"),
         }
-    }
-
-    fn metadata(&self, value: impl Fn(&crate::models::AudioMetadata) -> Option<&str>) -> String {
-        self.selected_file
-            .as_ref()
-            .and_then(|file| value(&file.metadata))
-            .unwrap_or("—")
-            .into()
-    }
-
-    fn container(&self) -> String {
-        self.selected_file
-            .as_ref()
-            .map(|file| file.metadata.container.clone())
-            .unwrap_or_else(|| "—".into())
-    }
-
-    fn encoder(&self) -> String {
-        self.selected_file
-            .as_ref()
-            .map(|file| file.metadata.codec.trim())
-            .filter(|codec| !codec.is_empty())
-            .unwrap_or("-")
-            .into()
     }
 
     fn cover_hint(&self) -> &str {
@@ -757,9 +737,9 @@ impl Component for AppModel {
                             set_spacing: 2,
                         },
                     },
-                },
-                #[wrap(Some)]
-                set_content = &adw::OverlaySplitView {
+                    },
+                    #[wrap(Some)]
+                    set_content = &adw::OverlaySplitView {
                     set_sidebar_position: gtk::PackType::End,
                     #[watch]
                     set_show_sidebar: model.inspector_visible && model.selected_file.is_some(),
@@ -902,86 +882,9 @@ impl Component for AppModel {
                     },
                     #[wrap(Some)]
                     set_sidebar = &gtk::Box {
-                        set_orientation: gtk::Orientation::Vertical,
-                        set_spacing: 12,
-                        set_width_request: 310,
-                        set_margin_all: 16,
-                        #[watch]
-                        set_sensitive: model.selected_file.is_some() && !model.is_saving(),
-                        gtk::Label { set_label: "元信息与封面", set_halign: gtk::Align::Start, add_css_class: "title-4" },
-                        gtk::Box {
-                            set_spacing: 8,
-                            gtk::Label { set_label: "容器格式", set_hexpand: true, set_halign: gtk::Align::Start },
-                            gtk::Label { #[watch] set_label: &model.container(), set_halign: gtk::Align::End },
-                        },
-                        gtk::Box {
-                            set_spacing: 8,
-                            gtk::Label { set_label: "编码器", set_hexpand: true, set_halign: gtk::Align::Start },
-                            gtk::Label { #[watch] set_label: &model.encoder(), set_halign: gtk::Align::End },
-                        },
-                        gtk::Box {
-                            set_spacing: 8,
-                            gtk::Label { set_label: "时长", set_hexpand: true, set_halign: gtk::Align::Start },
-                            gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.duration.as_deref()), set_halign: gtk::Align::End },
-                        },
-                        gtk::Box {
-                            set_spacing: 8,
-                            gtk::Label { set_label: "平均码率", set_hexpand: true, set_halign: gtk::Align::Start },
-                            gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.bitrate.as_deref()), set_halign: gtk::Align::End },
-                        },
-                        gtk::Box {
-                            set_spacing: 8,
-                            gtk::Label { set_label: "采样率", set_hexpand: true, set_halign: gtk::Align::Start },
-                            gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.sample_rate.as_deref()), set_halign: gtk::Align::End },
-                        },
-                        gtk::Box {
-                            set_spacing: 8,
-                            gtk::Label { set_label: "声道", set_hexpand: true, set_halign: gtk::Align::Start },
-                            gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.channels.as_deref()), set_halign: gtk::Align::End },
-                        },
-                        gtk::Box {
-                            set_spacing: 8,
-                            gtk::Label { set_label: "位深", set_hexpand: true, set_halign: gtk::Align::Start },
-                            gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.bits_per_sample.as_deref()), set_halign: gtk::Align::End },
-                        },
-                        gtk::Box {
-                            set_spacing: 8,
-                            gtk::Label { set_label: "文件大小", set_hexpand: true, set_halign: gtk::Align::Start },
-                            gtk::Label { #[watch] set_label: &model.metadata(|metadata| metadata.file_size.as_deref()), set_halign: gtk::Align::End },
-                        },
-                        #[name = "cover_frame"]
-                        adw::Clamp {
-                            set_maximum_size: 260,
-                            set_tightening_threshold: 260,
-                            set_halign: gtk::Align::Center,
-                            #[wrap(Some)]
-                            set_child = &gtk::Frame {
-                                #[name = "cover"]
-                                gtk::Picture {
-                                    set_width_request: 260,
-                                    set_height_request: 260,
-                                    set_can_shrink: true,
-                                },
-                            },
-                        },
-                        #[name = "cover_dimensions"]
-                        gtk::Label {
-                            set_halign: gtk::Align::Center,
-                            add_css_class: "dim-label",
-                        },
-                        gtk::Label {
-                            #[watch]
-                            set_label: model.cover_hint(),
-                            set_wrap: true,
-                            set_justify: gtk::Justification::Center,
-                        },
-                        gtk::Box {
-                            set_spacing: 8,
-                            set_halign: gtk::Align::Center,
-                            gtk::Button { set_label: "选择图片", connect_clicked => AppMsg::ChooseCover },
-                            gtk::Button { set_label: "移除", connect_clicked => AppMsg::RemoveCover },
-                        },
-                        },
+                        #[local_ref]
+                        inspector -> gtk::Box {},
+                    },
                     },
                 },
                 add_overlay = &gtk::Label {
@@ -1003,6 +906,13 @@ impl Component for AppModel {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let album_cover_textures = Rc::new(RefCell::new(HashMap::new()));
+        let inspector = InspectorComponent::builder()
+            .launch(InspectorState::default())
+            .forward(sender.input_sender(), |output| match output {
+                InspectorOutput::ChooseCover => AppMsg::ChooseCover,
+                InspectorOutput::CoverDropped(path) => AppMsg::CoverChosen(path),
+                InspectorOutput::RemoveCover => AppMsg::RemoveCover,
+            });
         let model = Self {
             root_directory: None,
             tree: None,
@@ -1043,6 +953,7 @@ impl Component for AppModel {
             quitting: false,
             close_dialog_open: false,
             draft_revision: 0,
+            inspector,
         };
         let syncing = Rc::new(Cell::new(false));
         let rendered_cover_revision = Cell::new(u64::MAX);
@@ -1150,6 +1061,7 @@ impl Component for AppModel {
         root.set_titlebar(Some(&header_bar));
 
         let tree_box = model.tree_rows.widget();
+        let inspector = model.inspector.widget();
         let editor_cover = Rc::new(RefCell::new(EditorCoverTransition::default()));
         let editor_cover_background = gtk::DrawingArea::new();
         editor_cover_background.set_can_target(false);
@@ -1178,18 +1090,6 @@ impl Component for AppModel {
         configure_macos_window(&root);
         configure_macos_window_style();
         configure_macos_menubar(&root, sender.clone());
-
-        let drop_target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
-        let drop_sender = sender.clone();
-        drop_target.connect_drop(move |_widget, value, _, _| {
-            value
-                .get::<gdk::FileList>()
-                .ok()
-                .and_then(|files| files.files().first().and_then(gio::File::path))
-                .map(|path| drop_sender.input(AppMsg::CoverChosen(path)))
-                .is_some()
-        });
-        widgets.cover_frame.add_controller(drop_target);
 
         let key_controller = gtk::EventControllerKey::new();
         key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1621,7 +1521,6 @@ impl Component for AppModel {
             .set_visible(model.is_batch_editing() && model.pending_batch_save.is_some());
 
         if rendered_cover_revision.replace(model.cover_revision) != model.cover_revision {
-            cover_dimensions.set_label(&update_cover(cover, &model.active_draft.cover));
             update_cover_background(
                 editor,
                 editor_cover,
@@ -1629,6 +1528,14 @@ impl Component for AppModel {
                 &model.active_draft.cover,
             );
         }
+        model
+            .inspector
+            .emit(InspectorInput::SetState(InspectorState::from_selection(
+                model.selected_file.as_ref(),
+                &model.active_draft,
+                model.cover_hint(),
+                !model.is_saving(),
+            )));
         let can_undo = model.history.can_undo(&model.selected_paths);
         let can_redo = model.history.can_redo(&model.selected_paths);
         undo_button.set_sensitive(can_undo && !model.is_saving());
@@ -1651,6 +1558,33 @@ impl Component for AppModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspector_state_reflects_the_current_file_and_cover_draft() {
+        let file = AudioFile {
+            metadata: crate::models::AudioMetadata {
+                container: "FLAC".into(),
+                codec: "FLAC".into(),
+                duration: Some("3:45".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let draft = TagDraft {
+            cover: CoverDraft::Removed,
+            ..Default::default()
+        };
+
+        let state = InspectorState::from_selection(Some(&file), &draft, "封面已移除", false);
+
+        assert!(state.has_selection);
+        assert!(!state.is_sensitive);
+        assert_eq!(state.container, "FLAC");
+        assert_eq!(state.codec, "FLAC");
+        assert_eq!(state.duration, "3:45");
+        assert_eq!(state.cover_hint, "封面已移除");
+        assert_eq!(state.cover, CoverDraft::Removed);
+    }
 
     #[test]
     fn canceling_close_keeps_pending_changes() {
