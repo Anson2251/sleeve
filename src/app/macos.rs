@@ -84,12 +84,12 @@ pub(super) fn configure_macos_menubar(_: &gtk::Window, sender: ComponentSender<A
         app_menu_item.setSubmenu(Some(&app_menu));
         main_menu.addItem(&app_menu_item);
 
-        add_macos_callback_item(&app_menu, mtm, target, "关于 Sleeve", 1, None);
+        add_macos_callback_item(&app_menu, mtm, target, &crate::t!("menu.about"), 1, None);
         app_menu.addItem(&NSMenuItem::separatorItem(mtm));
         add_macos_responder_item(
             &app_menu,
             mtm,
-            "隐藏 Sleeve",
+            &crate::t!("menu.hide"),
             sel!(hide:),
             "h",
             NSEventModifierFlags::Command,
@@ -97,7 +97,7 @@ pub(super) fn configure_macos_menubar(_: &gtk::Window, sender: ComponentSender<A
         add_macos_responder_item(
             &app_menu,
             mtm,
-            "隐藏其他",
+            &crate::t!("menu.hide_others"),
             sel!(hideOtherApplications:),
             "h",
             NSEventModifierFlags::Command | NSEventModifierFlags::Option,
@@ -105,7 +105,7 @@ pub(super) fn configure_macos_menubar(_: &gtk::Window, sender: ComponentSender<A
         add_macos_responder_item(
             &app_menu,
             mtm,
-            "全部显示",
+            &crate::t!("menu.show_all"),
             sel!(unhideAllApplications:),
             "",
             NSEventModifierFlags::empty(),
@@ -115,27 +115,27 @@ pub(super) fn configure_macos_menubar(_: &gtk::Window, sender: ComponentSender<A
             &app_menu,
             mtm,
             target,
-            "退出 Sleeve",
+            &crate::t!("menu.quit"),
             7,
             Some(("q", NSEventModifierFlags::Command)),
         );
 
-        let file_menu = add_macos_submenu(&main_menu, mtm, "文件");
+        let file_menu = add_macos_submenu(&main_menu, mtm, &crate::t!("menu.file"));
         add_macos_callback_item(
             &file_menu,
             mtm,
             target,
-            "打开目录…",
+            &crate::t!("menu.open_folder"),
             2,
             Some(("o", NSEventModifierFlags::Command)),
         );
 
-        let edit_menu = add_macos_submenu(&main_menu, mtm, "编辑");
+        let edit_menu = add_macos_submenu(&main_menu, mtm, &crate::t!("menu.edit"));
         add_macos_callback_item(
             &edit_menu,
             mtm,
             target,
-            "撤销",
+            &crate::t!("menu.undo"),
             3,
             Some(("z", NSEventModifierFlags::Command)),
         );
@@ -143,7 +143,7 @@ pub(super) fn configure_macos_menubar(_: &gtk::Window, sender: ComponentSender<A
             &edit_menu,
             mtm,
             target,
-            "重做",
+            &crate::t!("menu.redo"),
             4,
             Some((
                 "z",
@@ -154,7 +154,7 @@ pub(super) fn configure_macos_menubar(_: &gtk::Window, sender: ComponentSender<A
         add_macos_responder_item(
             &edit_menu,
             mtm,
-            "剪切",
+            &crate::t!("menu.cut"),
             sel!(cut:),
             "x",
             NSEventModifierFlags::Command,
@@ -162,7 +162,7 @@ pub(super) fn configure_macos_menubar(_: &gtk::Window, sender: ComponentSender<A
         add_macos_responder_item(
             &edit_menu,
             mtm,
-            "复制",
+            &crate::t!("menu.copy"),
             sel!(copy:),
             "c",
             NSEventModifierFlags::Command,
@@ -170,7 +170,7 @@ pub(super) fn configure_macos_menubar(_: &gtk::Window, sender: ComponentSender<A
         add_macos_responder_item(
             &edit_menu,
             mtm,
-            "粘贴",
+            &crate::t!("menu.paste"),
             sel!(paste:),
             "v",
             NSEventModifierFlags::Command,
@@ -179,15 +179,29 @@ pub(super) fn configure_macos_menubar(_: &gtk::Window, sender: ComponentSender<A
         add_macos_responder_item(
             &edit_menu,
             mtm,
-            "全选",
+            &crate::t!("menu.select_all"),
             sel!(selectAll:),
             "a",
             NSEventModifierFlags::Command,
         );
 
-        let view_menu = add_macos_submenu(&main_menu, mtm, "显示");
-        add_macos_callback_item(&view_menu, mtm, target, "显示/隐藏文件列表", 5, None);
-        add_macos_callback_item(&view_menu, mtm, target, "显示/隐藏检查器", 6, None);
+        let view_menu = add_macos_submenu(&main_menu, mtm, &crate::t!("menu.view"));
+        add_macos_callback_item(
+            &view_menu,
+            mtm,
+            target,
+            &crate::t!("menu.toggle_files"),
+            5,
+            None,
+        );
+        add_macos_callback_item(
+            &view_menu,
+            mtm,
+            target,
+            &crate::t!("menu.toggle_inspector"),
+            6,
+            None,
+        );
 
         NSApp(mtm).setMainMenu(Some(&main_menu));
     }

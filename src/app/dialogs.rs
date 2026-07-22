@@ -11,11 +11,11 @@ use super::{AppModel, AppMsg};
 
 pub(super) fn choose_directory(root: &gtk::Window, sender: ComponentSender<AppModel>) {
     let chooser = gtk::FileChooserNative::new(
-        Some("选择音乐目录"),
+        Some(&crate::t!("dialog.choose_music_directory")),
         Some(root),
         gtk::FileChooserAction::SelectFolder,
-        Some("打开"),
-        Some("取消"),
+        Some(&crate::t!("dialog.open")),
+        Some(&crate::t!("dialog.cancel")),
     );
     chooser.connect_response(move |dialog, response| {
         if response == gtk::ResponseType::Accept
@@ -30,11 +30,11 @@ pub(super) fn choose_directory(root: &gtk::Window, sender: ComponentSender<AppMo
 
 pub(super) fn choose_cover(root: &gtk::Window, sender: ComponentSender<AppModel>) {
     let chooser = gtk::FileChooserNative::new(
-        Some("选择封面图片"),
+        Some(&crate::t!("dialog.choose_cover")),
         Some(root),
         gtk::FileChooserAction::Open,
-        Some("选择"),
-        Some("取消"),
+        Some(&crate::t!("dialog.choose")),
+        Some(&crate::t!("dialog.cancel")),
     );
     chooser.connect_response(move |dialog, response| {
         if response == gtk::ResponseType::Accept

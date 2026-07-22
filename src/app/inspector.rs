@@ -37,7 +37,7 @@ impl Default for InspectorState {
             bits_per_sample: "—".into(),
             file_size: "—".into(),
             cover: CoverDraft::Unavailable,
-            cover_hint: "暂无封面".into(),
+            cover_hint: crate::t!("inspector.no_cover"),
         }
     }
 }
@@ -106,15 +106,114 @@ impl SimpleComponent for InspectorComponent {
             set_margin_all: 16,
             #[watch]
             set_sensitive: model.state.has_selection && model.state.is_sensitive,
-            gtk::Label { set_label: "元信息与封面", set_halign: gtk::Align::Start, add_css_class: "title-4" },
-            gtk::Box { set_spacing: 8, gtk::Label { set_label: "容器格式", set_hexpand: true, set_halign: gtk::Align::Start }, gtk::Label { #[watch] set_label: &model.state.container, set_halign: gtk::Align::End } },
-            gtk::Box { set_spacing: 8, gtk::Label { set_label: "编码器", set_hexpand: true, set_halign: gtk::Align::Start }, gtk::Label { #[watch] set_label: &model.state.codec, set_halign: gtk::Align::End } },
-            gtk::Box { set_spacing: 8, gtk::Label { set_label: "时长", set_hexpand: true, set_halign: gtk::Align::Start }, gtk::Label { #[watch] set_label: &model.state.duration, set_halign: gtk::Align::End } },
-            gtk::Box { set_spacing: 8, gtk::Label { set_label: "平均码率", set_hexpand: true, set_halign: gtk::Align::Start }, gtk::Label { #[watch] set_label: &model.state.bitrate, set_halign: gtk::Align::End } },
-            gtk::Box { set_spacing: 8, gtk::Label { set_label: "采样率", set_hexpand: true, set_halign: gtk::Align::Start }, gtk::Label { #[watch] set_label: &model.state.sample_rate, set_halign: gtk::Align::End } },
-            gtk::Box { set_spacing: 8, gtk::Label { set_label: "声道", set_hexpand: true, set_halign: gtk::Align::Start }, gtk::Label { #[watch] set_label: &model.state.channels, set_halign: gtk::Align::End } },
-            gtk::Box { set_spacing: 8, gtk::Label { set_label: "位深", set_hexpand: true, set_halign: gtk::Align::Start }, gtk::Label { #[watch] set_label: &model.state.bits_per_sample, set_halign: gtk::Align::End } },
-            gtk::Box { set_spacing: 8, gtk::Label { set_label: "文件大小", set_hexpand: true, set_halign: gtk::Align::Start }, gtk::Label { #[watch] set_label: &model.state.file_size, set_halign: gtk::Align::End } },
+            gtk::Label {
+                set_label: &crate::t!("inspector.title"),
+                set_halign: gtk::Align::Start,
+                add_css_class: "title-4"
+            },
+            gtk::Box {
+                set_spacing: 8,
+                gtk::Label {
+                    set_label: &crate::t!("inspector.container"),
+                    set_hexpand: true,
+                    set_halign: gtk::Align::Start
+                },
+                gtk::Label {
+                    #[watch]
+                    set_label: &model.state.container,
+                    set_halign: gtk::Align::End
+                }
+            },
+            gtk::Box {
+                set_spacing: 8,
+                gtk::Label {
+                    set_label: &crate::t!("inspector.codec"),
+                    set_hexpand: true,
+                    set_halign: gtk::Align::Start
+                },
+                gtk::Label {
+                    #[watch]
+                    set_label: &model.state.codec,
+                    set_halign: gtk::Align::End
+                }
+            },
+            gtk::Box {
+                set_spacing: 8,
+                gtk::Label {
+                    set_label: &crate::t!("inspector.duration"),
+                    set_hexpand: true,
+                    set_halign: gtk::Align::Start
+                },
+                gtk::Label {
+                    #[watch]
+                    set_label: &model.state.duration,
+                    set_halign: gtk::Align::End
+                }
+            },
+            gtk::Box {
+                set_spacing: 8,
+                gtk::Label {
+                    set_label: &crate::t!("inspector.bitrate"),
+                    set_hexpand: true, set_halign: gtk::Align::Start
+                },
+                gtk::Label {
+                    #[watch]
+                    set_label: &model.state.bitrate,
+                    set_halign: gtk::Align::End
+                }
+            },
+            gtk::Box {
+                set_spacing: 8,
+                gtk::Label {
+                    set_label: &crate::t!("inspector.sample_rate"),
+                    set_hexpand: true,
+                    set_halign: gtk::Align::Start
+                },
+                gtk::Label {
+                    #[watch]
+                    set_label: &model.state.sample_rate,
+                    set_halign: gtk::Align::End
+                }
+            },
+            gtk::Box {
+                set_spacing: 8,
+                gtk::Label {
+                    set_label: &crate::t!("inspector.channels"),
+                    set_hexpand: true,
+                    set_halign: gtk::Align::Start
+                },
+                gtk::Label {
+                    #[watch]
+                    set_label: &model.state.channels,
+                    set_halign: gtk::Align::End
+                }
+            },
+            gtk::Box {
+                set_spacing: 8,
+                gtk::Label {
+                    set_label: &crate::t!("inspector.bit_depth"),
+                    set_hexpand: true,
+                    set_halign: gtk::Align::Start
+                },
+                gtk::Label {
+                    #[watch]
+                    set_label: &model.state.bits_per_sample,
+                    set_halign: gtk::Align::End
+                }
+            },
+            gtk::Box {
+                set_spacing: 8,
+                gtk::Label {
+                    set_label: &crate::t!("inspector.file_size"),
+                    set_hexpand: true,
+                    set_halign: gtk::Align::Start
+                },
+                gtk::Label {
+                    #[watch]
+                    set_label: &model.state.file_size,
+                    set_halign: gtk::Align::End
+                }
+            },
             #[name = "cover_frame"]
             adw::Clamp {
                 set_maximum_size: 260,
@@ -145,13 +244,13 @@ impl SimpleComponent for InspectorComponent {
                 set_spacing: 8,
                 set_halign: gtk::Align::Center,
                 gtk::Button {
-                    set_label: "选择图片",
+                    set_label: &crate::t!("inspector.choose_image"),
                     connect_clicked[sender] => move |_| {
                         let _ = sender.output(InspectorOutput::ChooseCover);
                     },
                 },
                 gtk::Button {
-                    set_label: "移除",
+                    set_label: &crate::t!("inspector.remove"),
                     connect_clicked[sender] => move |_| {
                         let _ = sender.output(InspectorOutput::RemoveCover);
                     },
@@ -174,12 +273,7 @@ impl SimpleComponent for InspectorComponent {
             value
                 .get::<gdk::FileList>()
                 .ok()
-                .and_then(|files| {
-                    files
-                        .files()
-                        .first()
-                        .and_then(|file| gio::prelude::FileExt::path(file))
-                })
+                .and_then(|files| files.files().first().and_then(gio::prelude::FileExt::path))
                 .map(|path| {
                     drop_sender
                         .output(InspectorOutput::CoverDropped(path))

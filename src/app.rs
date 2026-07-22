@@ -198,9 +198,9 @@ impl AppModel {
 
     fn selection_summary(&self) -> String {
         match self.selected_paths.len() {
-            0 => "尚未选择文件".into(),
+            0 => crate::t!("app.no_file_selected"),
             1 => self.selected_path(),
-            count => format!("已选择 {count} 个文件"),
+            count => crate::tf!("app.selected_files", "count" => &count.to_string()),
         }
     }
 
@@ -208,7 +208,7 @@ impl AppModel {
         self.selected_file
             .as_ref()
             .map(|file| file.relative_path.display().to_string())
-            .unwrap_or_else(|| "尚未选择文件".into())
+            .unwrap_or_else(|| crate::t!("app.no_file_selected"))
     }
 
     fn header_title(&self) -> String {
@@ -226,17 +226,17 @@ impl AppModel {
         }
     }
 
-    fn cover_hint(&self) -> &str {
+    fn cover_hint(&self) -> String {
         if self.is_batch_editing() && self.covers_mixed {
-            "多个封面：选择图片可批量替换，或移除全部封面"
+            crate::t!("cover.mixed_hint")
         } else if let Some(error) = &self.cover_error {
-            error
+            error.clone()
         } else {
             match self.active_draft.cover {
-                CoverDraft::External(_) => "内存草稿封面：尚未写入音频文件",
-                CoverDraft::Embedded(_) => "文件中的嵌入封面（只读预览）",
-                CoverDraft::Removed => "封面已从当前内存草稿移除",
-                CoverDraft::Unavailable => "将图片拖放到封面上，或选择图片",
+                CoverDraft::External(_) => crate::t!("cover.external_hint"),
+                CoverDraft::Embedded(_) => crate::t!("cover.embedded_hint"),
+                CoverDraft::Removed => crate::t!("cover.removed_hint"),
+                CoverDraft::Unavailable => crate::t!("cover.unavailable_hint"),
             }
         }
     }
@@ -255,7 +255,7 @@ impl AppModel {
         self.draft_revision = self.draft_revision.wrapping_add(1);
     }
 
-    fn load_file(&mut self, file: AudioFile, status: &str) {
+    fn load_file(&mut self, file: AudioFile, status: String) {
         let original = TagDraft::from_audio_file(&file);
         self.active_draft = self
             .saved_drafts
@@ -264,11 +264,7 @@ impl AppModel {
             .unwrap_or_else(|| original.clone());
         self.original_draft = Some(original);
         self.saved_drafts.remove(&file.path);
-        self.status = if status.contains("{}") {
-            status.replacen("{}", &file.relative_path.display().to_string(), 1)
-        } else {
-            status.into()
-        };
+        self.status = status;
         self.set_selected_path(Some(file.path.clone()));
         self.selected_file = Some(file);
         self.cover_error = None;
@@ -459,10 +455,10 @@ impl AppModel {
         let Some(file) = self.selected_file.as_ref() else {
             return;
         };
-        if let Some(pending) = self.pending_save.take() {
-            if let Some(source) = pending.source {
-                source.remove();
-            }
+        if let Some(pending) = self.pending_save.take()
+            && let Some(source) = pending.source
+        {
+            source.remove();
         }
         self.pending_batch_save = None;
         let path = file.path.clone();
@@ -514,7 +510,7 @@ impl AppModel {
                 .validation_error(field)
                 .is_some()
         }) {
-            self.status = "请先修正表单中的无效字段。".into();
+            self.status = crate::t!("app.invalid_fields");
             self.pending_batch_save = Some(pending);
             return;
         }
@@ -522,7 +518,7 @@ impl AppModel {
             return;
         };
         self.batch_save_in_progress = true;
-        self.status = format!("正在批量保存 {} 个文件…", pending.paths.len());
+        self.status = crate::tf!("app.saving_files", "count" => &pending.paths.len().to_string());
         sender.spawn_oneshot_command(move || {
             let mut files = Vec::new();
             let mut snapshots = Vec::new();
@@ -581,7 +577,7 @@ impl AppModel {
         };
         pending.source = None;
         if !self.active_draft.is_valid() {
-            self.status = "请先修正表单中的无效字段。".into();
+            self.status = crate::t!("app.invalid_fields");
             self.pending_save = Some(pending);
             self.quitting = false;
             return;
@@ -596,7 +592,7 @@ impl AppModel {
         let root = root.clone();
         let draft = self.active_draft.clone();
         self.save_in_progress = true;
-        self.status = "正在保存标签…".into();
+        self.status = crate::t!("app.saving_tags");
         sender.spawn_oneshot_command(move || {
             let result = create_backup(&root, &source).and_then(|snapshot| {
                 write_draft(&source, &draft)
@@ -638,12 +634,16 @@ impl AppModel {
         }
         self.close_dialog_open = true;
         let dialog = adw::AlertDialog::builder()
-            .heading("保存更改？")
-            .body("关闭前有尚未保存的标签或封面更改。")
+            .heading(crate::t!("app.close.title"))
+            .body(crate::t!("app.close.body"))
             .prefer_wide_layout(true)
             .close_response("cancel")
             .build();
-        dialog.add_responses(&[("cancel", "取消"), ("discard", "不保存"), ("save", "保存")]);
+        dialog.add_responses(&[
+            ("cancel", &crate::t!("dialog.cancel")),
+            ("discard", &crate::t!("app.close.discard")),
+            ("save", &crate::t!("tooltip.save")),
+        ]);
         dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
         dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
         dialog.set_default_response(Some("save"));
@@ -700,7 +700,7 @@ impl Component for AppModel {
 
     view! {
         gtk::Window {
-            set_title: Some("Sleeve · Audio Tag Editor"),
+            set_title: Some(&crate::t!("app.title")),
             set_default_size: (1280, 760),
             set_resizable: true,
             set_fullscreened: false,
@@ -729,6 +729,7 @@ impl Component for AppModel {
                         set_vexpand: true,
                         #[local_ref]
                         tree_box -> gtk::Box {
+                            set_margin_all: 6,
                             set_orientation: gtk::Orientation::Vertical,
                             set_spacing: 2,
                         },
@@ -773,7 +774,7 @@ impl Component for AppModel {
                             },
                         },
                         gtk::Label {
-                            set_label: "请从左侧选择一个音频文件",
+                            set_label: &crate::t!("app.select_file"),
                             set_hexpand: true,
                             set_vexpand: true,
                             set_halign: gtk::Align::Center,
@@ -791,7 +792,7 @@ impl Component for AppModel {
                     },
                 },
                 add_overlay = &gtk::Label {
-                    set_label: "请先从顶部工具栏打开一个音乐文件夹",
+                    set_label: &crate::t!("app.open_folder"),
                     set_halign: gtk::Align::Center,
                     set_valign: gtk::Align::Center,
                     add_css_class: "title-4",
@@ -842,7 +843,7 @@ impl Component for AppModel {
             original_draft: None,
             active_draft: TagDraft::default(),
             saved_drafts: HashMap::new(),
-            status: "选择一个音乐目录以开始浏览。".into(),
+            status: crate::t!("app.initial_status"),
             cover_error: None,
             tree_revision: 0,
             selection_revision: 0,
@@ -884,7 +885,7 @@ impl Component for AppModel {
 
         let sidebar_button = gtk::ToggleButton::builder()
             .icon_name("sidebar-show-symbolic")
-            .tooltip_text("显示或隐藏文件列表")
+            .tooltip_text(crate::t!("tooltip.toggle_sidebar"))
             .sensitive(false)
             .build();
         let sidebar_sender = sender.clone();
@@ -895,7 +896,7 @@ impl Component for AppModel {
 
         let open_directory = gtk::Button::builder()
             .icon_name("folder-open-symbolic")
-            .tooltip_text("打开目录")
+            .tooltip_text(crate::t!("tooltip.open_folder"))
             .build();
         let open_sender = sender.clone();
         open_directory.connect_clicked(move |_| open_sender.input(AppMsg::ChooseDirectory));
@@ -903,7 +904,7 @@ impl Component for AppModel {
 
         let inspector_button = gtk::ToggleButton::builder()
             .icon_name("dialog-information-symbolic")
-            .tooltip_text("显示或隐藏元信息与封面")
+            .tooltip_text(crate::t!("tooltip.toggle_inspector"))
             .sensitive(false)
             .build();
         let inspector_sender = sender.clone();
@@ -933,7 +934,7 @@ impl Component for AppModel {
 
         let undo_button = gtk::Button::builder()
             .icon_name("edit-undo-symbolic")
-            .tooltip_text("撤销（⌘Z / Ctrl+Z）")
+            .tooltip_text(crate::t!("tooltip.undo"))
             .sensitive(false)
             .build();
         let undo_sender = sender.clone();
@@ -942,7 +943,7 @@ impl Component for AppModel {
 
         let redo_button = gtk::Button::builder()
             .icon_name("edit-redo-symbolic")
-            .tooltip_text("重做（⇧⌘Z / Ctrl+Shift+Z）")
+            .tooltip_text(crate::t!("tooltip.redo"))
             .sensitive(false)
             .build();
         let redo_sender = sender.clone();
@@ -951,7 +952,7 @@ impl Component for AppModel {
 
         let save_button = gtk::Button::builder()
             .icon_name("document-save-symbolic")
-            .tooltip_text("保存")
+            .tooltip_text(crate::t!("tooltip.save"))
             .sensitive(false)
             .build();
         let save_sender = sender.clone();
@@ -960,7 +961,7 @@ impl Component for AppModel {
 
         let batch_save_warning = gtk::Image::builder()
             .icon_name("dialog-warning-symbolic")
-            .tooltip_text("批量编辑尚未保存")
+            .tooltip_text(crate::t!("tooltip.batch_unsaved"))
             .visible(false)
             .build();
         batch_save_warning.add_css_class("batch-save-warning");
@@ -1037,11 +1038,11 @@ impl Component for AppModel {
             AppMsg::ChooseDirectory => choose_directory(root, sender),
             AppMsg::DirectoryChosen(path) => {
                 if self.is_saving() {
-                    self.status = "正在保存标签，请稍后再切换目录。".into();
+                    self.status = crate::t!("app.saving_before_switch");
                     return;
                 }
                 if self.pending_batch_save.is_some() {
-                    self.status = "批量编辑尚未保存，请先点击保存按钮。".into();
+                    self.status = crate::t!("app.batch_unsaved");
                     return;
                 }
                 if self.pending_save.is_some() || self.save_in_progress {
@@ -1050,7 +1051,7 @@ impl Component for AppModel {
                     return;
                 }
                 self.sidebar_visible = true;
-                self.status = format!("正在扫描 {}…", path.display());
+                self.status = crate::tf!("app.scanning", "path" => &path.display().to_string());
                 self.root_directory = Some(path.clone());
                 self.tree = None;
                 self.expanded_paths.clear();
@@ -1067,11 +1068,11 @@ impl Component for AppModel {
 
             AppMsg::SelectAudioFile { path, modifiers } => {
                 if self.is_saving() {
-                    self.status = "正在保存标签，请稍后再选择文件。".into();
+                    self.status = crate::t!("app.saving_before_select");
                     return;
                 }
                 if self.pending_batch_save.is_some() {
-                    self.status = "批量编辑尚未保存，请先点击保存按钮。".into();
+                    self.status = crate::t!("app.batch_unsaved");
                     return;
                 }
                 if self.selected_path.as_deref() != Some(path.as_path())
@@ -1095,7 +1096,7 @@ impl Component for AppModel {
                 let Some(root_path) = self.root_directory.clone() else {
                     return;
                 };
-                self.status = format!("正在读取 {}…", path.display());
+                self.status = crate::tf!("app.reading", "path" => &path.display().to_string());
                 sender.spawn_oneshot_command(move || CmdMsg::AudioLoaded {
                     result: Box::new(read_audio_file(path.clone(), root_path)),
                     path,
@@ -1139,7 +1140,7 @@ impl Component for AppModel {
             }
             AppMsg::Undo | AppMsg::Redo => {
                 if self.is_saving() || self.pending_batch_save.is_some() {
-                    self.status = "保存完成前无法撤销或重做。".into();
+                    self.status = crate::t!("app.undo_while_saving");
                     return;
                 }
                 let is_undo = matches!(msg, AppMsg::Undo);
@@ -1156,14 +1157,14 @@ impl Component for AppModel {
                     return;
                 };
                 let Some(batch) = self.history.take(&self.selected_paths, is_undo) else {
-                    self.status = "当前选择与最近的批量历史不匹配。".into();
+                    self.status = crate::t!("app.history_mismatch");
                     return;
                 };
                 self.batch_save_in_progress = true;
                 self.status = if is_undo {
-                    format!("正在撤销 {} 个文件…", batch.snapshots.len())
+                    crate::tf!("app.undoing", "count" => &batch.snapshots.len().to_string())
                 } else {
-                    format!("正在重做 {} 个文件…", batch.snapshots.len())
+                    crate::tf!("app.redoing", "count" => &batch.snapshots.len().to_string())
                 };
                 sender.spawn_oneshot_command(move || {
                     let result = restore_history_batch(&root, &batch);
@@ -1176,7 +1177,7 @@ impl Component for AppModel {
             }
             AppMsg::RequestClose => {
                 if self.is_saving() {
-                    self.status = "正在保存标签，完成后才能关闭窗口。".into();
+                    self.status = crate::t!("app.saving_before_close");
                 } else if self.has_pending_save() {
                     self.show_close_dialog(sender, root);
                 } else {
@@ -1202,13 +1203,11 @@ impl Component for AppModel {
                 adw::AboutDialog::builder()
                     .application_icon("com.github.anson2251.sleeve")
                     .application_name("Sleeve")
-                    .comments("音频标签与封面编辑器")
+                    .comments(crate::t!("app.description"))
                     .copyright("© 2026 Anson2251")
                     .developer_name("Anson2251")
                     .license_type(gtk::License::Custom)
-                    .license(
-                        "This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.\n\nThis program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.\n\nYou should have received a copy of the GNU General Public License along with this program.  If not, see <a href=\"https://www.gnu.org/licenses/\">https://www.gnu.org/licenses/</a>.",
-                    )
+                    .license(crate::t!("app.license"))
                     .website("https://github.com/anson2251/sleeve")
                     .build()
                     .present(Some(root));
@@ -1235,7 +1234,7 @@ impl Component for AppModel {
                         self.schedule_save(sender);
                     }
                 } else {
-                    self.cover_error = Some("请选择有效的图片文件。".into());
+                    self.cover_error = Some(crate::t!("app.invalid_image"));
                 }
             }
             AppMsg::RemoveCover => {
@@ -1274,9 +1273,9 @@ impl Component for AppModel {
                         }
                         self.tree = Some(tree);
                         self.sync_tree_rows();
-                        self.status = "目录扫描完成。选择一个音频文件以编辑其内存草稿。".into();
+                        self.status = crate::t!("app.scan_complete");
                     }
-                    Ok(None) => self.status = "该目录及其子目录中没有受支持的音频文件。".into(),
+                    Ok(None) => self.status = crate::t!("app.no_supported_audio"),
                     Err(error) => self.status = error,
                 }
             }
@@ -1291,7 +1290,10 @@ impl Component for AppModel {
                     return;
                 }
                 match *result {
-                    Ok(file) => self.load_file(file, "正在编辑 {}。"),
+                    Ok(file) => self.load_file(
+                        file,
+                        crate::tf!("app.editing", "path" => &path.display().to_string()),
+                    ),
                     Err(error) => {
                         self.clear_selection();
                         self.status = error;
@@ -1313,9 +1315,9 @@ impl Component for AppModel {
                             });
                         }
                         if self.active_draft == draft {
-                            self.load_file(file, "已自动保存。");
+                            self.load_file(file, crate::t!("app.autosaved"));
                         } else {
-                            self.status = "已自动保存，正在等待后续修改。".into();
+                            self.status = crate::t!("app.autosaved_pending");
                         }
                         if self.pending_save.is_some() {
                             self.save_current(sender);
@@ -1371,7 +1373,7 @@ impl Component for AppModel {
                         {
                             self.selected_file = Some(file);
                         }
-                        self.status = format!("已批量保存 {saved} 个文件。");
+                        self.status = crate::tf!("app.batch_saved", "count" => &saved.to_string());
                         if self.quitting {
                             self.finish_close(sender, _root);
                         } else {
@@ -1402,9 +1404,9 @@ impl Component for AppModel {
                             self.selected_file = Some(file);
                         }
                         self.status = if is_undo {
-                            format!("已撤销 {restored} 个文件。")
+                            crate::tf!("app.undone", "count" => &restored.to_string())
                         } else {
-                            format!("已重做 {restored} 个文件。")
+                            crate::tf!("app.redone", "count" => &restored.to_string())
                         };
                         self.load_batch_drafts(sender);
                     }
@@ -1482,11 +1484,11 @@ mod tests {
         assert!(state.visible);
         assert!(state.is_sensitive);
         assert!(state.is_batch_editing);
-        assert_eq!(state.placeholder(TagField::Artist), "多个值");
+        assert_eq!(state.placeholder(TagField::Artist), "form.multiple_values");
         assert_eq!(state.value(TagField::Title), "Song");
         assert_eq!(
             state.validation_error(TagField::Year),
-            Some("请输入 1000 至 9999 的四位年份。")
+            Some(crate::t!("validation.year"))
         );
     }
 

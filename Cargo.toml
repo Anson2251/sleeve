@@ -12,6 +12,7 @@ image = "0.25.10"
 libadwaita = { version = "0.9.2", features = ["v1_7"] }
 libblur = "0.24.0"
 relm4 = { version = "0.11.0", features = ["libadwaita"] }
+serde_json = "1.0"
 symphonia = { version = "0.5", features = ["mp3", "flac", "isomp4", "aac", "alac", "pcm", "vorbis", "ogg"] }
 
 [build-dependencies]

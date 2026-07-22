@@ -33,18 +33,19 @@ impl FormState {
         }
     }
 
-    pub(super) fn placeholder(&self, field: TagField) -> &str {
-        self.mixed_fields
-            .contains(&field)
-            .then_some("多个值")
-            .unwrap_or("")
+    pub(super) fn placeholder(&self, field: TagField) -> String {
+        if self.mixed_fields.contains(&field) {
+            crate::t!("form.multiple_values")
+        } else {
+            String::new()
+        }
     }
 
     pub(super) fn value(&self, field: TagField) -> &str {
         self.draft.value(field)
     }
 
-    pub(super) fn validation_error(&self, field: TagField) -> Option<&'static str> {
+    pub(super) fn validation_error(&self, field: TagField) -> Option<String> {
         self.draft.validation_error(field)
     }
 }
@@ -86,7 +87,7 @@ impl SimpleComponent for FormComponent {
             #[watch]
             set_sensitive: model.state.is_sensitive,
             gtk::Label {
-                set_label: "编辑任一字段会仅更新该字段，并应用到所有已选文件。",
+                set_label: &crate::t!("form.batch_hint"),
                 set_halign: gtk::Align::Start,
                 add_css_class: "dim-label",
                 #[watch]
@@ -99,159 +100,159 @@ impl SimpleComponent for FormComponent {
                 !model.state.is_batch_editing
             },
             gtk::Label {
-                set_label: "标题",
+                set_label: &crate::t!("form.title"),
                 set_halign: gtk::Align::Start
             },
             #[name = "title"]
             gtk::Entry {
                 #[watch]
-                set_placeholder_text: Some(model.state.placeholder(TagField::Title)),
+                set_placeholder_text: Some(&model.state.placeholder(TagField::Title)),
                 connect_changed[sender, syncing] => move |entry| if !syncing.get() {
                     let _ = sender.output(FormOutput::SetField(TagField::Title, entry.text().to_string()));
                 }
             },
             gtk::Label {
                 #[watch]
-                set_label: model.state.validation_error(TagField::Title).unwrap_or(""),
+                set_label: &model.state.validation_error(TagField::Title).unwrap_or_default(),
                 #[watch] set_visible: model.state.validation_error(TagField::Title).is_some(),
                 add_css_class: "error",
                 set_halign: gtk::Align::Start
             },
             gtk::Label {
-                set_label: "艺人",
+                set_label: &crate::t!("form.artist"),
                 set_halign: gtk::Align::Start
             },
             #[name = "artist"]
             gtk::Entry {
                 #[watch]
-                set_placeholder_text: Some(model.state.placeholder(TagField::Artist)),
+                set_placeholder_text: Some(&model.state.placeholder(TagField::Artist)),
                 connect_changed[sender, syncing] => move |entry| if !syncing.get() {
                     let _ = sender.output(FormOutput::SetField(TagField::Artist, entry.text().to_string()));
                 }
             },
             gtk::Label {
                 #[watch]
-                set_label: model.state.validation_error(TagField::Artist).unwrap_or(""),
+                set_label: &model.state.validation_error(TagField::Artist).unwrap_or_default(),
                 #[watch]
                 set_visible: model.state.validation_error(TagField::Artist).is_some(),
                 add_css_class: "error",
                 set_halign: gtk::Align::Start
             },
             gtk::Label {
-                set_label: "专辑",
+                set_label: &crate::t!("form.album"),
                 set_halign: gtk::Align::Start
             },
             #[name = "album"]
             gtk::Entry {
                 #[watch]
-                set_placeholder_text: Some(model.state.placeholder(TagField::Album)),
+                set_placeholder_text: Some(&model.state.placeholder(TagField::Album)),
                 connect_changed[sender, syncing] => move |entry| if !syncing.get() {
                     let _ = sender.output(FormOutput::SetField(TagField::Album, entry.text().to_string()));
                 }
             },
             gtk::Label {
                 #[watch]
-                set_label: model.state.validation_error(TagField::Album).unwrap_or(""),
+                set_label: &model.state.validation_error(TagField::Album).unwrap_or_default(),
                 #[watch]
                 set_visible: model.state.validation_error(TagField::Album).is_some(),
                 add_css_class: "error",
                 set_halign: gtk::Align::Start
             },
             gtk::Label {
-                set_label: "专辑艺人",
+                set_label: &crate::t!("form.album_artist"),
                 set_halign: gtk::Align::Start
             },
             #[name = "album_artist"]
             gtk::Entry {
                 #[watch]
-                set_placeholder_text: Some(model.state.placeholder(TagField::AlbumArtist)),
+                set_placeholder_text: Some(&model.state.placeholder(TagField::AlbumArtist)),
                 connect_changed[sender, syncing] => move |entry| if !syncing.get() {
                     let _ = sender.output(FormOutput::SetField(TagField::AlbumArtist, entry.text().to_string()));
                 }
             },
             gtk::Label {
                 #[watch]
-                set_label: model.state.validation_error(TagField::AlbumArtist).unwrap_or(""),
+                set_label: &model.state.validation_error(TagField::AlbumArtist).unwrap_or_default(),
                 #[watch]
                 set_visible: model.state.validation_error(TagField::AlbumArtist).is_some(),
                 add_css_class: "error",
                 set_halign: gtk::Align::Start
             },
             gtk::Label {
-                set_label: "年份",
+                set_label: &crate::t!("form.year"),
                 set_halign: gtk::Align::Start
             },
             #[name = "year"]
             gtk::Entry {
                 #[watch]
-                set_placeholder_text: Some(model.state.placeholder(TagField::Year)),
+                set_placeholder_text: Some(&model.state.placeholder(TagField::Year)),
                 connect_changed[sender, syncing] => move |entry| if !syncing.get() {
                     let _ = sender.output(FormOutput::SetField(TagField::Year, entry.text().to_string()));
                 }
             },
             gtk::Label {
                 #[watch]
-                set_label: model.state.validation_error(TagField::Year).unwrap_or(""),
+                set_label: &model.state.validation_error(TagField::Year).unwrap_or_default(),
                 #[watch]
                 set_visible: model.state.validation_error(TagField::Year).is_some(),
                 add_css_class: "error",
                 set_halign: gtk::Align::Start
             },
             gtk::Label {
-                set_label: "曲目号",
+                set_label: &crate::t!("form.track_number"),
                 set_halign: gtk::Align::Start
             },
             #[name = "track"]
             gtk::Entry {
                 #[watch]
-                set_placeholder_text: Some(model.state.placeholder(TagField::TrackNumber)),
+                set_placeholder_text: Some(&model.state.placeholder(TagField::TrackNumber)),
                 connect_changed[sender, syncing] => move |entry| if !syncing.get() {
                     let _ = sender.output(FormOutput::SetField(TagField::TrackNumber, entry.text().to_string()));
                 }
             },
             gtk::Label {
                 #[watch]
-                set_label: model.state.validation_error(TagField::TrackNumber).unwrap_or(""),
+                set_label: &model.state.validation_error(TagField::TrackNumber).unwrap_or_default(),
                 #[watch]
                 set_visible: model.state.validation_error(TagField::TrackNumber).is_some(),
                 add_css_class: "error",
                 set_halign: gtk::Align::Start
             },
             gtk::Label {
-                set_label: "碟号",
+                set_label: &crate::t!("form.disc_number"),
                 set_halign: gtk::Align::Start
             },
             #[name = "disc"]
             gtk::Entry {
                 #[watch]
-                set_placeholder_text: Some(model.state.placeholder(TagField::DiscNumber)),
+                set_placeholder_text: Some(&model.state.placeholder(TagField::DiscNumber)),
                 connect_changed[sender, syncing] => move |entry| if !syncing.get() {
                     let _ = sender.output(FormOutput::SetField(TagField::DiscNumber, entry.text().to_string()));
                 }
             },
             gtk::Label {
                 #[watch]
-                set_label: model.state.validation_error(TagField::DiscNumber).unwrap_or(""),
+                set_label: &model.state.validation_error(TagField::DiscNumber).unwrap_or_default(),
                 #[watch]
                 set_visible: model.state.validation_error(TagField::DiscNumber).is_some(),
                 add_css_class: "error",
                 set_halign: gtk::Align::Start
             },
             gtk::Label {
-                set_label: "流派",
+                set_label: &crate::t!("form.genre"),
                 set_halign: gtk::Align::Start
             },
             #[name = "genre"]
             gtk::Entry {
                 #[watch]
-                set_placeholder_text: Some(model.state.placeholder(TagField::Genre)),
+                set_placeholder_text: Some(&model.state.placeholder(TagField::Genre)),
                 connect_changed[sender, syncing] => move |entry| if !syncing.get() {
                     let _ = sender.output(FormOutput::SetField(TagField::Genre, entry.text().to_string()));
                 }
             },
             gtk::Label {
                 #[watch]
-                set_label: model.state.validation_error(TagField::Genre).unwrap_or(""),
+                set_label: &model.state.validation_error(TagField::Genre).unwrap_or_default(),
                 #[watch]
                 set_visible: model.state.validation_error(TagField::Genre).is_some(),
                 add_css_class: "error",

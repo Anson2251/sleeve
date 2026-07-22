@@ -98,7 +98,7 @@ impl TagDraft {
         }
     }
 
-    pub fn validation_error(&self, field: TagField) -> Option<&'static str> {
+    pub fn validation_error(&self, field: TagField) -> Option<String> {
         let value = match field {
             TagField::Title => &self.title,
             TagField::Artist => &self.artist,
@@ -111,18 +111,18 @@ impl TagDraft {
         };
 
         if value.chars().count() > 255 {
-            return Some("最长为 255 个字符。");
+            return Some(crate::t!("validation.too_long"));
         }
         match field {
             TagField::Year if !value.is_empty() => match value.parse::<u16>() {
                 Ok(year) if (1000..=9999).contains(&year) => None,
-                _ => Some("请输入 1000 至 9999 的四位年份。"),
+                _ => Some(crate::t!("validation.year")),
             },
             TagField::TrackNumber | TagField::DiscNumber if !value.is_empty() => {
                 match value.parse::<u16>() {
-                    Ok(0) => Some("请输入大于 0 的整数。"),
+                    Ok(0) => Some(crate::t!("validation.positive_integer")),
                     Ok(_) => None,
-                    Err(_) => Some("请输入 1 至 65535 的整数。"),
+                    Err(_) => Some(crate::t!("validation.track_or_disc")),
                 }
             }
             _ => None,
@@ -189,11 +189,11 @@ mod tests {
         };
         assert_eq!(
             draft.validation_error(TagField::Year),
-            Some("请输入 1000 至 9999 的四位年份。")
+            Some(crate::t!("validation.year"))
         );
         assert_eq!(
             draft.validation_error(TagField::TrackNumber),
-            Some("请输入大于 0 的整数。")
+            Some(crate::t!("validation.positive_integer"))
         );
         assert!(!draft.is_valid());
     }

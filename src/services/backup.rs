@@ -7,9 +7,9 @@ use crate::models::BackupVersion;
 const BACKUP_DIRECTORY: &str = ".sleeve-backups";
 
 pub fn create_backup(root: &Path, source: &Path) -> Result<BackupVersion, String> {
-    let relative_path = source
-        .strip_prefix(root)
-        .map_err(|_| format!("文件 {} 不属于当前目录。", source.display()))?;
+    let relative_path = source.strip_prefix(root).map_err(
+        |_| crate::tf!("error.file_outside_directory", "path" => &source.display().to_string()),
+    )?;
     let timestamp = next_backup_timestamp(root);
     let destination = root
         .join(BACKUP_DIRECTORY)
@@ -17,11 +17,14 @@ pub fn create_backup(root: &Path, source: &Path) -> Result<BackupVersion, String
         .join(relative_path);
     let parent = destination
         .parent()
-        .ok_or_else(|| "无法确定备份目录。".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| format!("无法创建备份目录：{error}"))?;
-    fs::copy(source, &destination).map_err(|error| format!("无法创建备份：{error}"))?;
+        .ok_or_else(|| crate::t!("error.backup_directory"))?;
+    fs::create_dir_all(parent).map_err(
+        |error| crate::tf!("error.create_backup_directory", "error" => &error.to_string()),
+    )?;
+    fs::copy(source, &destination)
+        .map_err(|error| crate::tf!("error.create_backup", "error" => &error.to_string()))?;
     let size_bytes = fs::metadata(&destination)
-        .map_err(|error| format!("无法读取备份信息：{error}"))?
+        .map_err(|error| crate::tf!("error.read_backup", "error" => &error.to_string()))?
         .len();
     Ok(BackupVersion {
         timestamp,
@@ -46,7 +49,8 @@ fn next_backup_timestamp(root: &Path) -> String {
 }
 
 pub fn restore_snapshot(source: &Path, snapshot: &Path) -> Result<(), String> {
-    fs::copy(snapshot, source).map_err(|error| format!("无法恢复备份：{error}"))?;
+    fs::copy(snapshot, source)
+        .map_err(|error| crate::tf!("error.restore_backup", "error" => &error.to_string()))?;
     Ok(())
 }
 
@@ -55,7 +59,7 @@ pub fn clear_backups(root: &Path) -> Result<(), String> {
     match fs::remove_dir_all(&backup_root) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("无法清理备份目录：{error}")),
+        Err(error) => Err(crate::tf!("error.clear_backups", "error" => &error.to_string())),
     }
 }
 

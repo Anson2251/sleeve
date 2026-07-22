@@ -7,7 +7,7 @@ use crate::models::{CoverDraft, TagDraft};
 pub fn write_draft(path: &Path, draft: &TagDraft) -> Result<(), String> {
     let mut tag = Tag::new()
         .read_from_path(path)
-        .map_err(|error| format!("无法读取待保存标签：{error}"))?;
+        .map_err(|error| crate::tf!("error.write_read_tag", "error" => &error.to_string()))?;
 
     set_or_remove(
         &mut *tag,
@@ -55,7 +55,7 @@ pub fn write_draft(path: &Path, draft: &TagDraft) -> Result<(), String> {
     apply_cover(&mut *tag, &draft.cover)?;
 
     tag.write_to_path(&path.to_string_lossy())
-        .map_err(|error| format!("无法写入标签：{error}"))
+        .map_err(|error| crate::tf!("error.write_tag", "error" => &error.to_string()))
 }
 
 fn set_or_remove<T: AudioTagEdit + ?Sized>(
@@ -78,7 +78,7 @@ fn set_year<T: AudioTagEdit + ?Sized>(tag: &mut T, value: &str) -> Result<(), St
     }
     let year = value
         .parse::<i32>()
-        .map_err(|_| "年份无效，无法保存。".to_string())?;
+        .map_err(|_| crate::t!("error.invalid_year"))?;
     tag.set_year(year);
     Ok(())
 }
@@ -95,7 +95,7 @@ where
     }
     let value = value
         .parse::<u16>()
-        .map_err(|_| "数值字段无效，无法保存。".to_string())?;
+        .map_err(|_| crate::t!("error.invalid_number"))?;
     set(tag, value);
     Ok(())
 }
@@ -108,7 +108,8 @@ fn apply_cover<T: AudioTagEdit + ?Sized>(tag: &mut T, cover: &CoverDraft) -> Res
             tag.set_album_cover(Picture::new(bytes, infer_mime_type(bytes)?))
         }
         CoverDraft::External(path) => {
-            let bytes = fs::read(path).map_err(|error| format!("无法读取封面图片：{error}"))?;
+            let bytes = fs::read(path)
+                .map_err(|error| crate::tf!("error.read_cover", "error" => &error.to_string()))?;
             let mime_type = infer_mime_type(&bytes)?;
             tag.set_album_cover(Picture::new(&bytes, mime_type));
         }
@@ -118,13 +119,13 @@ fn apply_cover<T: AudioTagEdit + ?Sized>(tag: &mut T, cover: &CoverDraft) -> Res
 
 fn infer_mime_type(bytes: &[u8]) -> Result<MimeType, String> {
     image::guess_format(bytes)
-        .map_err(|error| format!("无法识别封面图片类型：{error}"))
+        .map_err(|error| crate::tf!("error.cover_type", "error" => &error.to_string()))
         .and_then(|format| match format {
             image::ImageFormat::Jpeg => Ok(MimeType::Jpeg),
             image::ImageFormat::Png => Ok(MimeType::Png),
             image::ImageFormat::Gif => Ok(MimeType::Gif),
             image::ImageFormat::Bmp => Ok(MimeType::Bmp),
             image::ImageFormat::Tiff => Ok(MimeType::Tiff),
-            _ => Err("封面格式必须为 JPEG、PNG、GIF、BMP 或 TIFF。".into()),
+            _ => Err(crate::t!("error.cover_format")),
         })
 }

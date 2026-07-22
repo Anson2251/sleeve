@@ -138,7 +138,7 @@ pub(super) fn rollback_history_batch(snapshots: &[(PathBuf, BackupVersion)]) -> 
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(format!("回滚失败：{}", errors.join("；")))
+        Err(crate::tf!("error.rollback", "errors" => &errors.join("；")))
     }
 }
 

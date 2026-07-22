@@ -19,9 +19,9 @@ use crate::models::{AudioFile, AudioMetadata};
 pub fn read_audio_file(path: PathBuf, root: PathBuf) -> Result<AudioFile, String> {
     let tag = Tag::new()
         .read_from_path(&path)
-        .map_err(|error| format!("无法读取标签：{error}"))?;
-    let filesystem_metadata =
-        fs::metadata(&path).map_err(|error| format!("无法读取文件信息：{error}"))?;
+        .map_err(|error| crate::tf!("error.read_tag", "error" => &error.to_string()))?;
+    let filesystem_metadata = fs::metadata(&path)
+        .map_err(|error| crate::tf!("error.read_file_info", "error" => &error.to_string()))?;
     let (track_number, _) = tag.track();
     let (disc_number, _) = tag.disc();
 
@@ -230,15 +230,15 @@ fn fallback_metadata(path: &Path, size: u64) -> AudioMetadata {
 fn container_name(path: &Path) -> String {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .unwrap_or("未知")
-        .to_ascii_uppercase()
+        .map(str::to_ascii_uppercase)
+        .unwrap_or_else(|| crate::t!("metadata.unknown"))
 }
 
 fn format_channels(count: usize) -> String {
     match count {
-        1 => "单声道 (1)".into(),
-        2 => "立体声 (2)".into(),
-        count => format!("{count} 声道"),
+        1 => crate::t!("metadata.mono"),
+        2 => crate::t!("metadata.stereo"),
+        count => crate::tf!("metadata.channels", "count" => &count.to_string()),
     }
 }
 
@@ -265,7 +265,7 @@ mod tests {
     fn formats_duration_size_and_channels() {
         assert_eq!(format_duration(61.2), "1:01");
         assert_eq!(format_file_size(1024), "1.0 KB");
-        assert_eq!(format_channels(2), "立体声 (2)");
+        assert_eq!(format_channels(2), crate::t!("metadata.stereo"));
     }
 
     #[test]

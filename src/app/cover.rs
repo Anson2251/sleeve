@@ -155,11 +155,11 @@ pub(super) fn update_cover(picture: &gtk::Picture, cover: &CoverDraft) -> String
             let dimensions = format!("{} × {} px", pixbuf.width(), pixbuf.height());
             let size = byte_size
                 .map(format_byte_size)
-                .unwrap_or_else(|| "大小未知".into());
+                .unwrap_or_else(|| crate::t!("cover.unknown_size"));
             picture.set_pixbuf(Some(&scale_cover_preview(&pixbuf)));
             format!("{dimensions} · {size}")
         }
-        None => "无封面图像".into(),
+        None => crate::t!("cover.no_image"),
     }
 }
 

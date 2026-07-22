@@ -10,7 +10,13 @@ use audiotags::Tag;
 use crate::models::FileTreeNode;
 
 pub fn scan_directory(root: PathBuf) -> Result<Option<FileTreeNode>, String> {
-    build_node(&root).map_err(|error| format!("无法扫描 {}：{error}", root.display()))
+    build_node(&root).map_err(|error| {
+        crate::tf!(
+            "error.scan_directory",
+            "path" => &root.display().to_string(),
+            "error" => &error.to_string(),
+        )
+    })
 }
 
 fn build_node(path: &Path) -> io::Result<Option<FileTreeNode>> {
