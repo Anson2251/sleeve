@@ -20,7 +20,7 @@ const EDITOR_COVER_TRANSITION_DURATION: Duration = Duration::from_millis(300);
 const BLURRED_COVER_CACHE_CAPACITY: usize = 16;
 const COVER_PREVIEW_MAX_SIZE: i32 = 520;
 const EDITOR_COVER_BACKGROUND_SIZE: u32 = 500;
-const EDITOR_COVER_BLUR_RADIUS: u32 = 18;
+const EDITOR_COVER_BLUR_RADIUS: u32 = 32;
 
 #[derive(Debug, Clone)]
 pub(super) struct BlurredCover {
@@ -145,8 +145,7 @@ pub(super) fn update_cover(picture: &gtk::Picture, cover: &CoverDraft) -> String
     picture.set_pixbuf(None::<&gdk_pixbuf::Pixbuf>);
 
     let byte_size = match cover {
-        CoverDraft::External(path) => std::fs::metadata(path).ok().map(|metadata| metadata.len()),
-        CoverDraft::Embedded(bytes) => Some(bytes.len() as u64),
+        CoverDraft::Embedded(bytes) | CoverDraft::Converted(bytes) => Some(bytes.len() as u64),
         CoverDraft::Unavailable | CoverDraft::Removed => None,
     };
 
@@ -180,8 +179,7 @@ fn cached_blurred_cover(
 
 fn cover_hash(cover: &CoverDraft) -> Option<u64> {
     let bytes = match cover {
-        CoverDraft::External(path) => std::fs::read(path).ok()?,
-        CoverDraft::Embedded(bytes) => bytes.clone(),
+        CoverDraft::Embedded(bytes) | CoverDraft::Converted(bytes) => bytes.clone(),
         CoverDraft::Unavailable | CoverDraft::Removed => return None,
     };
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -237,13 +235,9 @@ fn cover_pixbuf(cover: &CoverDraft) -> Option<gdk_pixbuf::Pixbuf> {
 
 fn decoded_cover_image(cover: &CoverDraft) -> Option<image::DynamicImage> {
     match cover {
-        CoverDraft::External(path) => image::ImageReader::open(path)
-            .ok()?
-            .with_guessed_format()
-            .ok()?
-            .decode()
-            .ok(),
-        CoverDraft::Embedded(bytes) => image::load_from_memory(bytes).ok(),
+        CoverDraft::Embedded(bytes) | CoverDraft::Converted(bytes) => {
+            image::load_from_memory(bytes).ok()
+        }
         CoverDraft::Unavailable | CoverDraft::Removed => None,
     }
 }

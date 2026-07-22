@@ -1,8 +1,9 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeSet, HashMap},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
+    sync::Arc,
     time::Duration,
 };
 
@@ -19,7 +20,10 @@ use crate::{
         AudioFile, BackupVersion, CoverDraft, FileTreeNode, TagDraft, TagField,
         audio_paths_between, common_draft,
     },
-    services::{clear_backups, create_backup, read_audio_file, scan_directory, write_draft},
+    services::{
+        clear_backups, create_backup, normalize_cover_bytes, read_audio_file, scan_directory,
+        write_draft,
+    },
     ui,
 };
 
@@ -144,6 +148,11 @@ pub enum AppMsg {
 
 #[derive(Debug)]
 pub enum CmdMsg {
+    CoverNormalized {
+        result: Result<Vec<u8>, String>,
+        selected_path: Option<PathBuf>,
+        selection_revision: u64,
+    },
     DirectoryScanned {
         result: Result<Option<FileTreeNode>, String>,
         path: PathBuf,
@@ -233,8 +242,8 @@ impl AppModel {
             error.clone()
         } else {
             match self.active_draft.cover {
-                CoverDraft::External(_) => crate::t!("cover.external_hint"),
                 CoverDraft::Embedded(_) => crate::t!("cover.embedded_hint"),
+                CoverDraft::Converted(_) => crate::t!("cover.external_hint"),
                 CoverDraft::Removed => crate::t!("cover.removed_hint"),
                 CoverDraft::Unavailable => crate::t!("cover.unavailable_hint"),
             }
@@ -270,6 +279,41 @@ impl AppModel {
         self.cover_error = None;
         self.cover_revision = self.cover_revision.wrapping_add(1);
         self.draft_revision = self.draft_revision.wrapping_add(1);
+    }
+
+    fn sync_album_cover_after_save(&mut self, file_path: &Path, embedded_cover: Option<&[u8]>) {
+        let cover_arc = embedded_cover.map(|bytes| Arc::new(bytes.to_vec()));
+        let album_path = {
+            let Some(tree) = self.tree.as_mut() else {
+                return;
+            };
+            let Some(album_path) = tree.update_album_cover_for_file(file_path, cover_arc.clone())
+            else {
+                return;
+            };
+            album_path
+        };
+
+        let key = (album_path.clone(), 0);
+        if let Some(texture) = embedded_cover
+            .and_then(|bytes| gdk::Texture::from_bytes(&glib::Bytes::from(bytes)).ok())
+        {
+            self.album_cover_textures.borrow_mut().insert(key, texture);
+        } else {
+            self.album_cover_textures.borrow_mut().remove(&key);
+        }
+
+        let index = self
+            .tree_rows
+            .iter()
+            .position(|row| row.path() == album_path);
+        drop(album_path);
+        if let Some(index) = index {
+            let mut guard = self.tree_rows.guard();
+            if let Some(row) = guard.get_mut(index) {
+                row.set_cover(cover_arc);
+            }
+        }
     }
 
     fn sync_tree_rows(&mut self) {
@@ -917,16 +961,7 @@ impl Component for AppModel {
         header_bar.pack_end(&inspector_button);
 
         let style_provider = gtk::CssProvider::new();
-        style_provider.load_from_data(
-            ".file-tree-row { min-height: 34px; padding: 0 8px; border: none; border-radius: 6px; box-shadow: none; background: transparent; }\
-             .file-tree-row:hover { background: alpha(@theme_fg_color, 0.06); }\
-             .file-tree-row.selected { background: alpha(@accent_bg_color, 0.22); color: @accent_fg_color; }\
-             .file-tree-row:focus { box-shadow: none; outline: none; }\
-             .regular-file { font-weight: normal; }\
-             .tree-thumbnail, .album-thumbnail { min-width: 24px; min-height: 24px; border-radius: 4px; }\
-             .editor-cover-background { opacity: 0.2; }\
-             .batch-save-warning { color: #e5a50a; }",
-        );
+        style_provider.load_from_resource("/com/github/anson2251/sleeve/style.css");
         if let Some(display) = gdk::Display::default() {
             gtk::style_context_add_provider_for_display(
                 &display,
@@ -1217,28 +1252,17 @@ impl Component for AppModel {
             }
             AppMsg::ChooseCover => choose_cover(root, sender),
             AppMsg::CoverChosen(path) => {
-                if image::ImageReader::open(&path)
-                    .ok()
-                    .and_then(|reader| reader.with_guessed_format().ok())
-                    .and_then(|reader| reader.decode().ok())
-                    .is_some()
-                {
-                    let cover = CoverDraft::External(path);
-                    self.cover_error = None;
-                    if self.is_batch_editing() {
-                        self.batch_draft_revision = self.batch_draft_revision.wrapping_add(1);
-                        self.active_draft.cover = cover.clone();
-                        self.covers_mixed = false;
-                        self.cover_revision = self.cover_revision.wrapping_add(1);
-                        self.stage_batch_cover(cover);
-                    } else {
-                        self.active_draft.cover = cover;
-                        self.cover_revision = self.cover_revision.wrapping_add(1);
-                        self.schedule_save(sender);
-                    }
-                } else {
-                    self.cover_error = Some(crate::t!("app.invalid_image"));
-                }
+                let selected_path = self.selected_path.clone();
+                let selection_revision = self.selection_revision;
+                sender.spawn_oneshot_command(move || CmdMsg::CoverNormalized {
+                    result: std::fs::read(&path)
+                        .map_err(
+                            |error| crate::tf!("error.read_cover", "error" => &error.to_string()),
+                        )
+                        .and_then(|bytes| normalize_cover_bytes(&bytes)),
+                    selected_path,
+                    selection_revision,
+                });
             }
             AppMsg::RemoveCover => {
                 if self.is_batch_editing() {
@@ -1258,6 +1282,35 @@ impl Component for AppModel {
 
     fn update_cmd(&mut self, msg: CmdMsg, sender: ComponentSender<Self>, _root: &Self::Root) {
         match msg {
+            CmdMsg::CoverNormalized {
+                result,
+                selected_path,
+                selection_revision,
+            } => {
+                if selection_revision != self.selection_revision
+                    || selected_path != self.selected_path
+                {
+                    return;
+                }
+                match result {
+                    Ok(bytes) => {
+                        let cover = CoverDraft::Converted(bytes);
+                        self.cover_error = None;
+                        if self.is_batch_editing() {
+                            self.batch_draft_revision = self.batch_draft_revision.wrapping_add(1);
+                            self.active_draft.cover = cover.clone();
+                            self.covers_mixed = false;
+                            self.cover_revision = self.cover_revision.wrapping_add(1);
+                            self.stage_batch_cover(cover);
+                        } else {
+                            self.active_draft.cover = cover;
+                            self.cover_revision = self.cover_revision.wrapping_add(1);
+                            self.schedule_save(sender);
+                        }
+                    }
+                    Err(_) => self.cover_error = Some(crate::t!("app.invalid_image")),
+                }
+            }
             CmdMsg::DirectoryScanned {
                 result,
                 path,
@@ -1310,8 +1363,18 @@ impl Component for AppModel {
                 pending,
             } => {
                 self.save_in_progress = false;
+                let cover_changed = self
+                    .original_draft
+                    .as_ref()
+                    .is_some_and(|orig| orig.cover != draft.cover);
                 match *result {
                     Ok(file) => {
+                        if cover_changed {
+                            self.sync_album_cover_after_save(
+                                &file.path,
+                                file.embedded_cover.as_deref(),
+                            );
+                        }
                         if let Some(snapshot) = snapshot {
                             self.history.record_save(HistoryBatch {
                                 snapshots: vec![(file.path.clone(), snapshot)],
@@ -1369,7 +1432,16 @@ impl Component for AppModel {
                 match *result {
                     Ok(files) => {
                         let saved = files.len();
+                        let cover_changed = pending.cover.is_some();
                         self.history.record_save(batch);
+                        if cover_changed {
+                            for file in &files {
+                                self.sync_album_cover_after_save(
+                                    &file.path,
+                                    file.embedded_cover.as_deref(),
+                                );
+                            }
+                        }
                         if let Some(file) = files
                             .into_iter()
                             .find(|file| self.selected_path.as_deref() == Some(file.path.as_path()))
@@ -1399,6 +1471,12 @@ impl Component for AppModel {
                 match *result {
                     Ok((files, current_batch)) => {
                         let restored = files.len();
+                        for file in &files {
+                            self.sync_album_cover_after_save(
+                                &file.path,
+                                file.embedded_cover.as_deref(),
+                            );
+                        }
                         self.history.complete_restore(current_batch, is_undo);
                         if let Some(file) = files
                             .into_iter()

@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{io::Cursor, path::Path};
 
 use audiotags::{AudioTagEdit, MimeType, Picture, Tag};
 
@@ -104,17 +104,30 @@ fn apply_cover<T: AudioTagEdit + ?Sized>(tag: &mut T, cover: &CoverDraft) -> Res
     match cover {
         CoverDraft::Unavailable => {}
         CoverDraft::Removed => tag.remove_album_cover(),
-        CoverDraft::Embedded(bytes) => {
+        CoverDraft::Embedded(bytes) | CoverDraft::Converted(bytes) => {
             tag.set_album_cover(Picture::new(bytes, infer_mime_type(bytes)?))
-        }
-        CoverDraft::External(path) => {
-            let bytes = fs::read(path)
-                .map_err(|error| crate::tf!("error.read_cover", "error" => &error.to_string()))?;
-            let mime_type = infer_mime_type(&bytes)?;
-            tag.set_album_cover(Picture::new(&bytes, mime_type));
         }
     }
     Ok(())
+}
+
+pub fn normalize_cover_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let format = image::guess_format(bytes)
+        .map_err(|error| crate::tf!("error.cover_type", "error" => &error.to_string()))?;
+    if matches!(
+        format,
+        image::ImageFormat::Jpeg | image::ImageFormat::Png | image::ImageFormat::Gif
+    ) {
+        return Ok(bytes.to_vec());
+    }
+
+    let image = image::load_from_memory_with_format(bytes, format)
+        .map_err(|error| crate::tf!("error.cover_type", "error" => &error.to_string()))?;
+    let mut jpeg = Cursor::new(Vec::new());
+    image
+        .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+        .map_err(|error| crate::tf!("error.cover_type", "error" => &error.to_string()))?;
+    Ok(jpeg.into_inner())
 }
 
 fn infer_mime_type(bytes: &[u8]) -> Result<MimeType, String> {
@@ -128,4 +141,35 @@ fn infer_mime_type(bytes: &[u8]) -> Result<MimeType, String> {
             image::ImageFormat::Tiff => Ok(MimeType::Tiff),
             _ => Err(crate::t!("error.cover_format")),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn converts_non_native_cover_formats_to_jpeg() {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([12, 34, 56, 255]),
+        ));
+
+        for format in [
+            image::ImageFormat::WebP,
+            image::ImageFormat::Bmp,
+            image::ImageFormat::Tiff,
+        ] {
+            let mut source = std::io::Cursor::new(Vec::new());
+            image.write_to(&mut source, format).unwrap();
+
+            let converted = normalize_cover_bytes(&source.into_inner()).unwrap();
+
+            assert_eq!(
+                image::guess_format(&converted).unwrap(),
+                image::ImageFormat::Jpeg
+            );
+            assert!(matches!(infer_mime_type(&converted), Ok(MimeType::Jpeg)));
+        }
+    }
 }

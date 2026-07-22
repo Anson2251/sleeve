@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::collections::HashSet;
 
 use super::AudioFile;
 
@@ -19,7 +19,7 @@ pub enum CoverDraft {
     #[default]
     Unavailable,
     Embedded(Vec<u8>),
-    External(PathBuf),
+    Converted(Vec<u8>),
     Removed,
 }
 

@@ -6,4 +6,7 @@
   <gresource prefix="/com/github/anson2251/sleeve/icons/512x512/apps/">
     <file alias="com.github.anson2251.sleeve.png">icons/sleeve-icon.png</file>
   </gresource>
+  <gresource prefix="/com/github/anson2251/sleeve/">
+    <file>style.css</file>
+  </gresource>
 </gresources>

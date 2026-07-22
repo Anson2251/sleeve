@@ -57,6 +57,18 @@ impl TreeRowComponent {
     pub fn set_expanded(&mut self, expanded: bool) {
         self.row.expanded = expanded;
     }
+
+    pub fn set_cover(&mut self, cover_bytes: Option<std::sync::Arc<Vec<u8>>>) {
+        if self.row.album_cover == cover_bytes {
+            return;
+        }
+        self.row.album_cover = cover_bytes;
+        self.texture = self
+            .row
+            .album_cover
+            .as_deref()
+            .and_then(|bytes| gdk::Texture::from_bytes(&glib::Bytes::from(bytes)).ok());
+    }
 }
 
 #[relm4::factory(pub)]
@@ -96,7 +108,6 @@ impl FactoryComponent for TreeRowComponent {
                     set_pixel_size: NAVIGATION_ICON_SIZE,
                 },
                 relm4::adw::Clamp {
-                    add_css_class: "tree-thumbnail",
                     set_maximum_size: ALBUM_ICON_SIZE,
                     set_tightening_threshold: ALBUM_ICON_SIZE,
                     set_hexpand: false,
@@ -107,6 +118,7 @@ impl FactoryComponent for TreeRowComponent {
                     set_visible: self.texture.is_some(),
                     #[wrap(Some)]
                     set_child = &gtk::Picture {
+                        add_css_class: "tree-thumbnail",
                         set_size_request: (ALBUM_ICON_SIZE, ALBUM_ICON_SIZE),
                         set_keep_aspect_ratio: true,
                         set_can_shrink: true,

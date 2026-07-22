@@ -107,6 +107,40 @@ impl FileTreeNode {
         paths
     }
 
+    pub fn update_album_cover_for_file(
+        &mut self,
+        file_path: &Path,
+        cover: Option<Arc<Vec<u8>>>,
+    ) -> Option<PathBuf> {
+        match self {
+            Self::Directory {
+                path,
+                children,
+                is_album,
+                album_cover,
+                ..
+            } => {
+                if !file_path.starts_with(path.as_path()) {
+                    return None;
+                }
+                for child in children {
+                    if let Some(album_path) =
+                        child.update_album_cover_for_file(file_path, cover.clone())
+                    {
+                        return Some(album_path);
+                    }
+                }
+                if *is_album {
+                    *album_cover = cover;
+                    Some(path.clone())
+                } else {
+                    None
+                }
+            }
+            Self::AudioFile { .. } => None,
+        }
+    }
+
     fn append_album_directory_paths(&self, paths: &mut Vec<PathBuf>) {
         if let Self::Directory {
             path,
@@ -217,6 +251,48 @@ mod tests {
         };
         assert_eq!(name, "music/artist/album");
         assert_eq!(path, PathBuf::from("music/artist/album"));
+    }
+
+    #[test]
+    fn updates_the_nearest_album_cover_for_a_saved_file() {
+        let first_cover = Arc::new(vec![1, 2, 3]);
+        let replacement_cover = Arc::new(vec![4, 5, 6]);
+        let song = PathBuf::from("music/artist/album/song.mp3");
+        let mut tree = FileTreeNode::directory_with_album_cover(
+            PathBuf::from("music"),
+            vec![
+                FileTreeNode::directory_with_album_cover(
+                    PathBuf::from("music/artist"),
+                    vec![
+                        FileTreeNode::directory_with_album_cover(
+                            PathBuf::from("music/artist/album"),
+                            vec![FileTreeNode::audio(song.clone())],
+                            true,
+                            Some(first_cover),
+                        ),
+                        FileTreeNode::audio(PathBuf::from("music/artist/other.mp3")),
+                    ],
+                    false,
+                    None,
+                ),
+                FileTreeNode::audio(PathBuf::from("music/loose.mp3")),
+            ],
+            false,
+            None,
+        );
+
+        let album_path = tree.update_album_cover_for_file(&song, Some(replacement_cover.clone()));
+
+        assert_eq!(album_path, Some(PathBuf::from("music/artist/album")));
+        let album = tree
+            .flatten(&[
+                PathBuf::from("music/artist"),
+                PathBuf::from("music/artist/album"),
+            ])
+            .into_iter()
+            .find(|row| row.path == Path::new("music/artist/album"))
+            .expect("album row");
+        assert_eq!(album.album_cover, Some(replacement_cover));
     }
 
     #[test]
