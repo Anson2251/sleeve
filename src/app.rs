@@ -1,19 +1,15 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeSet, HashMap, VecDeque},
-    hash::{Hash, Hasher},
+    collections::{BTreeSet, HashMap},
     path::PathBuf,
     rc::Rc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use image::GenericImageView;
-use libblur::{AnisotropicRadius, BlurImageMut, FastBlurChannels, ThreadingPolicy, stack_blur};
 use relm4::adw::prelude::*;
 use relm4::{
     Component, ComponentParts, ComponentSender, RelmWidgetExt, adw,
     factory::FactoryVecDeque,
-    gtk::gdk::prelude::GdkCairoContextExt,
     gtk::{self, gdk, gio},
 };
 
@@ -22,58 +18,23 @@ use crate::{
         AudioFile, BackupVersion, CoverDraft, FileTreeNode, TagDraft, TagField,
         audio_paths_between, common_draft,
     },
-    services::{
-        clear_backups, create_backup, read_audio_file, restore_snapshot, scan_directory,
-        write_draft,
-    },
+    services::{clear_backups, create_backup, read_audio_file, scan_directory, write_draft},
     ui,
 };
 
-const EDITOR_COVER_TRANSITION_DURATION: Duration = Duration::from_millis(300);
+mod cover;
+mod dialogs;
+mod history;
 
-const BLURRED_COVER_CACHE_CAPACITY: usize = 16;
-
-#[derive(Debug, Clone)]
-struct BlurredCover {
-    hash: u64,
-    pixbuf: gdk_pixbuf::Pixbuf,
-}
-
-#[derive(Debug, Default)]
-struct BlurredCoverCache {
-    entries: HashMap<u64, gdk_pixbuf::Pixbuf>,
-    usage_order: VecDeque<u64>,
-}
-
-impl BlurredCoverCache {
-    fn get(&mut self, hash: u64) -> Option<BlurredCover> {
-        let pixbuf = self.entries.get(&hash)?.clone();
-        self.touch(hash);
-        Some(BlurredCover { hash, pixbuf })
-    }
-
-    fn insert(&mut self, cover: BlurredCover) {
-        self.entries.insert(cover.hash, cover.pixbuf);
-        self.touch(cover.hash);
-        while self.entries.len() > BLURRED_COVER_CACHE_CAPACITY {
-            if let Some(hash) = self.usage_order.pop_front() {
-                self.entries.remove(&hash);
-            }
-        }
-    }
-
-    fn touch(&mut self, hash: u64) {
-        self.usage_order.retain(|cached_hash| *cached_hash != hash);
-        self.usage_order.push_back(hash);
-    }
-}
-
-#[derive(Debug, Default)]
-struct EditorCoverTransition {
-    previous: Option<BlurredCover>,
-    current: Option<BlurredCover>,
-    started_at: Option<Instant>,
-}
+use cover::{
+    BlurredCoverCache, EditorCoverTransition, draw_cover, transition_progress, update_cover,
+    update_cover_background,
+};
+use dialogs::{choose_cover, choose_directory, sync_entry};
+use history::{
+    BatchHistory, HistoryBatch, is_current_batch_draft_result, restore_history_batch,
+    rollback_history_batch,
+};
 
 pub struct AppModel {
     root_directory: Option<PathBuf>,
@@ -108,88 +69,6 @@ pub struct AppModel {
     quitting: bool,
     close_dialog_open: bool,
     draft_revision: u64,
-}
-
-#[derive(Debug)]
-pub(crate) struct HistoryBatch {
-    snapshots: Vec<(PathBuf, BackupVersion)>,
-}
-
-impl HistoryBatch {
-    fn paths(&self) -> BTreeSet<PathBuf> {
-        self.snapshots
-            .iter()
-            .map(|(path, _)| path.clone())
-            .collect()
-    }
-}
-
-#[derive(Debug, Default)]
-struct BatchHistory {
-    undo: Vec<HistoryBatch>,
-    redo: Vec<HistoryBatch>,
-}
-
-fn is_current_batch_draft_result(
-    result_paths: &BTreeSet<PathBuf>,
-    result_selection_revision: u64,
-    result_batch_draft_revision: u64,
-    selected_paths: &BTreeSet<PathBuf>,
-    selection_revision: u64,
-    batch_draft_revision: u64,
-) -> bool {
-    result_paths == selected_paths
-        && result_paths.len() > 1
-        && result_selection_revision == selection_revision
-        && result_batch_draft_revision == batch_draft_revision
-}
-
-impl BatchHistory {
-    fn can_undo(&self, selected_paths: &BTreeSet<PathBuf>) -> bool {
-        self.undo
-            .last()
-            .is_some_and(|batch| batch.paths() == *selected_paths)
-    }
-
-    fn can_redo(&self, selected_paths: &BTreeSet<PathBuf>) -> bool {
-        self.redo
-            .last()
-            .is_some_and(|batch| batch.paths() == *selected_paths)
-    }
-
-    fn record_save(&mut self, batch: HistoryBatch) {
-        self.undo.push(batch);
-        self.redo.clear();
-    }
-
-    fn take(&mut self, selected_paths: &BTreeSet<PathBuf>, is_undo: bool) -> Option<HistoryBatch> {
-        let stack = if is_undo {
-            &mut self.undo
-        } else {
-            &mut self.redo
-        };
-        stack
-            .last()
-            .is_some_and(|batch| batch.paths() == *selected_paths)
-            .then(|| stack.pop())
-            .flatten()
-    }
-
-    fn restore_failed(&mut self, batch: HistoryBatch, is_undo: bool) {
-        if is_undo {
-            self.undo.push(batch);
-        } else {
-            self.redo.push(batch);
-        }
-    }
-
-    fn complete_restore(&mut self, current: HistoryBatch, is_undo: bool) {
-        if is_undo {
-            self.redo.push(current);
-        } else {
-            self.undo.push(current);
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -289,54 +168,6 @@ pub enum CmdMsg {
         is_undo: bool,
     },
     BackupsCleared(Result<(), String>),
-}
-
-fn restore_history_batch(
-    root: &std::path::Path,
-    batch: &HistoryBatch,
-) -> Result<(Vec<AudioFile>, HistoryBatch), String> {
-    let mut restored_files = Vec::new();
-    let mut current_snapshots = Vec::new();
-    for (path, snapshot) in &batch.snapshots {
-        let current_snapshot = match create_backup(root, path) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                rollback_history_batch(&current_snapshots)?;
-                return Err(error);
-            }
-        };
-        current_snapshots.push((path.clone(), current_snapshot));
-        if let Err(error) = restore_snapshot(path, &snapshot.path) {
-            rollback_history_batch(&current_snapshots)?;
-            return Err(error);
-        }
-        match read_audio_file(path.clone(), root.to_owned()) {
-            Ok(file) => restored_files.push(file),
-            Err(error) => {
-                rollback_history_batch(&current_snapshots)?;
-                return Err(error);
-            }
-        }
-    }
-    Ok((
-        restored_files,
-        HistoryBatch {
-            snapshots: current_snapshots,
-        },
-    ))
-}
-
-fn rollback_history_batch(snapshots: &[(PathBuf, BackupVersion)]) -> Result<(), String> {
-    let errors = snapshots
-        .iter()
-        .rev()
-        .filter_map(|(path, snapshot)| restore_snapshot(path, &snapshot.path).err())
-        .collect::<Vec<_>>();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("回滚失败：{}", errors.join("；")))
-    }
 }
 
 impl AppModel {
@@ -1822,66 +1653,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn batch_history_moves_complete_batch_between_undo_and_redo() {
-        let first = PathBuf::from("first.flac");
-        let second = PathBuf::from("second.flac");
-        let selected = BTreeSet::from([first.clone(), second.clone()]);
-        let mut history = BatchHistory::default();
-        let batch = HistoryBatch {
-            snapshots: vec![
-                (first, backup("first-before.flac")),
-                (second, backup("second-before.flac")),
-            ],
-        };
-
-        history.redo.push(HistoryBatch {
-            snapshots: vec![(PathBuf::from("stale.flac"), backup("stale.flac"))],
-        });
-        history.record_save(batch);
-
-        assert!(history.redo.is_empty());
-        assert!(history.can_undo(&selected));
-        let undo_batch = history.take(&selected, true).expect("undo batch");
-        assert!(history.undo.is_empty());
-        history.complete_restore(undo_batch, true);
-        assert!(history.can_redo(&selected));
-    }
-
-    #[test]
-    fn failed_batch_restore_returns_the_batch_to_its_original_stack() {
-        let path = PathBuf::from("track.flac");
-        let selected = BTreeSet::from([path.clone()]);
-        let batch = HistoryBatch {
-            snapshots: vec![(path, backup("before.flac"))],
-        };
-        let mut history = BatchHistory::default();
-        history.record_save(batch);
-        let in_flight = history.take(&selected, true).expect("undo batch");
-
-        history.restore_failed(in_flight, true);
-
-        assert!(history.can_undo(&selected));
-        assert!(history.redo.is_empty());
-    }
-
-    #[test]
-    fn batch_draft_result_rejects_stale_edit_revision() {
-        let paths = BTreeSet::from([PathBuf::from("first.flac"), PathBuf::from("second.flac")]);
-
-        assert!(!is_current_batch_draft_result(&paths, 3, 4, &paths, 3, 5));
-        assert!(!is_current_batch_draft_result(&paths, 2, 5, &paths, 3, 5));
-        assert!(is_current_batch_draft_result(&paths, 3, 5, &paths, 3, 5));
-    }
-
-    fn backup(path: &str) -> BackupVersion {
-        BackupVersion {
-            timestamp: "now".into(),
-            path: PathBuf::from(path),
-            size_bytes: 1,
-        }
-    }
-
-    #[test]
     fn canceling_close_keeps_pending_changes() {
         let pending = PendingBatchSave {
             paths: vec![PathBuf::from("track.flac")],
@@ -1890,42 +1661,6 @@ mod tests {
         };
 
         assert!(!pending.is_empty());
-    }
-
-    #[test]
-    fn batch_undo_requires_an_exact_selection_match() {
-        let first = PathBuf::from("first.flac");
-        let second = PathBuf::from("second.flac");
-        let mut history = BatchHistory::default();
-        history.record_save(HistoryBatch {
-            snapshots: vec![
-                (
-                    first.clone(),
-                    BackupVersion {
-                        timestamp: "now".into(),
-                        path: PathBuf::from("first-backup.flac"),
-                        size_bytes: 1,
-                    },
-                ),
-                (
-                    second.clone(),
-                    BackupVersion {
-                        timestamp: "now".into(),
-                        path: PathBuf::from("second-backup.flac"),
-                        size_bytes: 1,
-                    },
-                ),
-            ],
-        });
-
-        assert!(!history.can_undo(&BTreeSet::from([first.clone()])));
-        assert!(
-            history
-                .take(&BTreeSet::from([first.clone()]), true)
-                .is_none()
-        );
-        assert_eq!(history.undo.len(), 1);
-        assert!(history.can_undo(&BTreeSet::from([first, second])));
     }
 }
 
@@ -2214,270 +1949,4 @@ fn configure_macos_window_style() {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     }
-}
-
-fn choose_directory(root: &gtk::Window, sender: ComponentSender<AppModel>) {
-    let chooser = gtk::FileChooserNative::new(
-        Some("选择音乐目录"),
-        Some(root),
-        gtk::FileChooserAction::SelectFolder,
-        Some("打开"),
-        Some("取消"),
-    );
-    chooser.connect_response(move |dialog, response| {
-        if response == gtk::ResponseType::Accept
-            && let Some(path) = dialog.file().and_then(|file| file.path())
-        {
-            sender.input(AppMsg::DirectoryChosen(path));
-        }
-        dialog.destroy();
-    });
-    chooser.show();
-}
-
-fn choose_cover(root: &gtk::Window, sender: ComponentSender<AppModel>) {
-    let chooser = gtk::FileChooserNative::new(
-        Some("选择封面图片"),
-        Some(root),
-        gtk::FileChooserAction::Open,
-        Some("选择"),
-        Some("取消"),
-    );
-    chooser.connect_response(move |dialog, response| {
-        if response == gtk::ResponseType::Accept
-            && let Some(path) = dialog.file().and_then(|file| file.path())
-        {
-            sender.input(AppMsg::CoverChosen(path));
-        }
-        dialog.destroy();
-    });
-    chooser.show();
-}
-
-fn sync_entry(entry: &gtk::Entry, value: &str) {
-    if entry.text().as_str() != value {
-        entry.set_text(value);
-    }
-}
-
-const COVER_PREVIEW_MAX_SIZE: i32 = 520;
-const EDITOR_COVER_BACKGROUND_SIZE: u32 = 500;
-const EDITOR_COVER_BLUR_RADIUS: u32 = 18;
-
-fn update_cover_background(
-    overlay: &gtk::Overlay,
-    editor_cover: &Rc<RefCell<EditorCoverTransition>>,
-    cache: &RefCell<BlurredCoverCache>,
-    cover: &CoverDraft,
-) {
-    let Some(background) = overlay.child().and_downcast::<gtk::DrawingArea>() else {
-        return;
-    };
-    let next_cover = cached_blurred_cover(cache, cover);
-    let mut transition = editor_cover.borrow_mut();
-    if transition.current.as_ref().map(|cover| cover.hash)
-        == next_cover.as_ref().map(|cover| cover.hash)
-    {
-        return;
-    }
-
-    transition.previous = transition.current.take();
-    transition.current = next_cover;
-    transition.started_at =
-        (transition.previous.is_some() || transition.current.is_some()).then(Instant::now);
-    let animate = transition.started_at.is_some();
-    drop(transition);
-
-    background.queue_draw();
-    if animate {
-        let transition = editor_cover.clone();
-        background.add_tick_callback(move |widget, _| {
-            widget.queue_draw();
-            if transition_progress(&transition.borrow()) >= 1.0 {
-                let mut transition = transition.borrow_mut();
-                transition.previous = None;
-                transition.started_at = None;
-                glib::ControlFlow::Break
-            } else {
-                glib::ControlFlow::Continue
-            }
-        });
-    }
-}
-
-fn transition_progress(transition: &EditorCoverTransition) -> f64 {
-    let Some(started_at) = transition.started_at else {
-        return 1.0;
-    };
-    let progress = (started_at.elapsed().as_secs_f64()
-        / EDITOR_COVER_TRANSITION_DURATION.as_secs_f64())
-    .clamp(0.0, 1.0);
-    1.0 - (1.0 - progress).powi(3)
-}
-
-fn draw_cover(
-    context: &gtk::cairo::Context,
-    pixbuf: &gdk_pixbuf::Pixbuf,
-    width: i32,
-    height: i32,
-    opacity: f64,
-) {
-    if opacity <= 0.0 {
-        return;
-    }
-    let scale = (width as f64 / pixbuf.width() as f64).max(height as f64 / pixbuf.height() as f64);
-    let scaled_width = pixbuf.width() as f64 * scale;
-    let scaled_height = pixbuf.height() as f64 * scale;
-    let x = (width as f64 - scaled_width) / 2.0;
-    let y = (height as f64 - scaled_height) / 2.0;
-
-    let _ = context.save();
-    context.rectangle(0.0, 0.0, width as f64, height as f64);
-    context.clip();
-    context.scale(scale, scale);
-    context.set_source_pixbuf(pixbuf, x / scale, y / scale);
-    let _ = context.paint_with_alpha(opacity);
-    let _ = context.restore();
-}
-
-fn update_cover(picture: &gtk::Picture, cover: &CoverDraft) -> String {
-    picture.set_filename(None::<&str>);
-    picture.set_pixbuf(None::<&gdk_pixbuf::Pixbuf>);
-
-    let byte_size = match cover {
-        CoverDraft::External(path) => std::fs::metadata(path).ok().map(|metadata| metadata.len()),
-        CoverDraft::Embedded(bytes) => Some(bytes.len() as u64),
-        CoverDraft::Unavailable | CoverDraft::Removed => None,
-    };
-
-    match cover_pixbuf(cover) {
-        Some(pixbuf) => {
-            let dimensions = format!("{} × {} px", pixbuf.width(), pixbuf.height());
-            let size = byte_size
-                .map(format_byte_size)
-                .unwrap_or_else(|| "大小未知".into());
-            picture.set_pixbuf(Some(&scale_cover_preview(&pixbuf)));
-            format!("{dimensions} · {size}")
-        }
-        None => "无封面图像".into(),
-    }
-}
-
-fn cached_blurred_cover(
-    cache: &RefCell<BlurredCoverCache>,
-    cover: &CoverDraft,
-) -> Option<BlurredCover> {
-    let hash = cover_hash(cover)?;
-    if let Some(cover) = cache.borrow_mut().get(hash) {
-        return Some(cover);
-    }
-
-    let pixbuf = blurred_cover_pixbuf(cover)?;
-    let cover = BlurredCover { hash, pixbuf };
-    cache.borrow_mut().insert(cover.clone());
-    Some(cover)
-}
-
-fn cover_hash(cover: &CoverDraft) -> Option<u64> {
-    let bytes = match cover {
-        CoverDraft::External(path) => std::fs::read(path).ok()?,
-        CoverDraft::Embedded(bytes) => bytes.clone(),
-        CoverDraft::Unavailable | CoverDraft::Removed => return None,
-    };
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    Some(hasher.finish())
-}
-
-fn blurred_cover_pixbuf(cover: &CoverDraft) -> Option<gdk_pixbuf::Pixbuf> {
-    let rgb = decoded_cover_image(cover)?
-        .resize_to_fill(
-            EDITOR_COVER_BACKGROUND_SIZE,
-            EDITOR_COVER_BACKGROUND_SIZE,
-            image::imageops::FilterType::Triangle,
-        )
-        .to_rgb8();
-    let (width, height) = rgb.dimensions();
-    let mut pixels = rgb.into_raw();
-    let mut blur_image =
-        BlurImageMut::borrow(&mut pixels, width, height, FastBlurChannels::Channels3);
-    stack_blur(
-        &mut blur_image,
-        AnisotropicRadius::new(EDITOR_COVER_BLUR_RADIUS),
-        ThreadingPolicy::Adaptive,
-    )
-    .ok()?;
-
-    Some(gdk_pixbuf::Pixbuf::from_bytes(
-        &glib::Bytes::from_owned(pixels),
-        gdk_pixbuf::Colorspace::Rgb,
-        false,
-        8,
-        width as i32,
-        height as i32,
-        (width * 3) as i32,
-    ))
-}
-
-fn cover_pixbuf(cover: &CoverDraft) -> Option<gdk_pixbuf::Pixbuf> {
-    let image = decoded_cover_image(cover)?;
-    let (width, height) = image.dimensions();
-    let pixels = image.to_rgba8().into_raw();
-
-    Some(gdk_pixbuf::Pixbuf::from_bytes(
-        &glib::Bytes::from_owned(pixels),
-        gdk_pixbuf::Colorspace::Rgb,
-        true,
-        8,
-        width as i32,
-        height as i32,
-        (width * 4) as i32,
-    ))
-}
-
-fn decoded_cover_image(cover: &CoverDraft) -> Option<image::DynamicImage> {
-    match cover {
-        CoverDraft::External(path) => image::ImageReader::open(path)
-            .ok()?
-            .with_guessed_format()
-            .ok()?
-            .decode()
-            .ok(),
-        CoverDraft::Embedded(bytes) => image::load_from_memory(bytes).ok(),
-        CoverDraft::Unavailable | CoverDraft::Removed => None,
-    }
-}
-
-fn format_byte_size(bytes: u64) -> String {
-    const MIB: u64 = 1024 * 1024;
-    const KIB: u64 = 1024;
-    if bytes >= MIB {
-        format!("{:.1} MB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.1} KB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-fn scale_cover_preview(pixbuf: &gdk_pixbuf::Pixbuf) -> gdk_pixbuf::Pixbuf {
-    let width = pixbuf.width();
-    let height = pixbuf.height();
-    let scale = (COVER_PREVIEW_MAX_SIZE as f64 / width as f64)
-        .min(COVER_PREVIEW_MAX_SIZE as f64 / height as f64)
-        .min(1.0);
-
-    if scale == 1.0 {
-        return pixbuf.clone();
-    }
-
-    let scaled_width = (width as f64 * scale).round() as i32;
-    let scaled_height = (height as f64 * scale).round() as i32;
-    pixbuf
-        .scale_simple(
-            scaled_width.max(1),
-            scaled_height.max(1),
-            gdk_pixbuf::InterpType::Bilinear,
-        )
-        .unwrap_or_else(|| pixbuf.clone())
 }
