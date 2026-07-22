@@ -3,7 +3,7 @@ use relm4::{
     gtk::{
         self,
         gio::prelude::FileExt,
-        prelude::{EditableExt, FileChooserExt, NativeDialogExt},
+        prelude::{FileChooserExt, NativeDialogExt},
     },
 };
 
@@ -45,10 +45,4 @@ pub(super) fn choose_cover(root: &gtk::Window, sender: ComponentSender<AppModel>
         dialog.destroy();
     });
     chooser.show();
-}
-
-pub(super) fn sync_entry(entry: &gtk::Entry, value: &str) {
-    if entry.text().as_str() != value {
-        entry.set_text(value);
-    }
 }

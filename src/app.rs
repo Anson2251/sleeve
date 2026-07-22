@@ -25,19 +25,23 @@ use crate::{
 
 mod cover;
 mod dialogs;
+mod form;
 mod history;
 mod inspector;
+mod macos;
 
 use cover::{
     BlurredCoverCache, EditorCoverTransition, draw_cover, transition_progress,
     update_cover_background,
 };
-use dialogs::{choose_cover, choose_directory, sync_entry};
+use dialogs::{choose_cover, choose_directory};
+use form::{FormComponent, FormInput, FormOutput, FormState};
 use history::{
     BatchHistory, HistoryBatch, is_current_batch_draft_result, restore_history_batch,
     rollback_history_batch,
 };
 use inspector::{InspectorComponent, InspectorInput, InspectorOutput, InspectorState};
+use macos::{configure_macos_menubar, configure_macos_window, configure_macos_window_style};
 
 pub struct AppModel {
     root_directory: Option<PathBuf>,
@@ -73,6 +77,7 @@ pub struct AppModel {
     close_dialog_open: bool,
     draft_revision: u64,
     inspector: Controller<InspectorComponent>,
+    form: Controller<FormComponent>,
 }
 
 #[derive(Debug)]
@@ -197,13 +202,6 @@ impl AppModel {
             1 => self.selected_path(),
             count => format!("已选择 {count} 个文件"),
         }
-    }
-
-    fn field_placeholder(&self, field: TagField) -> &str {
-        self.mixed_fields
-            .contains(&field)
-            .then_some("多个值")
-            .unwrap_or("")
     }
 
     fn selected_path(&self) -> String {
@@ -690,10 +688,8 @@ impl Component for AppModel {
 
     additional_fields! {
         rendered_cover_revision: Cell<u64>,
-        rendered_draft_revision: Cell<u64>,
         sidebar_button: gtk::ToggleButton,
         inspector_button: gtk::ToggleButton,
-        syncing: Rc<Cell<bool>>,
         status_label: gtk::Label,
         undo_button: gtk::Button,
         redo_button: gtk::Button,
@@ -771,101 +767,8 @@ impl Component for AppModel {
                                 set_halign: gtk::Align::Start,
                                 add_css_class: "title-4",
                             },
-                            gtk::Label {
-                                set_label: "编辑任一字段会仅更新该字段，并应用到所有已选文件。",
-                                set_halign: gtk::Align::Start,
-                                add_css_class: "dim-label",
-                                #[watch]
-                                set_visible: model.is_batch_editing(),
-                            },
-                            gtk::Label { set_label: " ", #[watch] set_visible: !model.is_batch_editing() },
-                            gtk::Label { set_label: "标题", set_halign: gtk::Align::Start },
-                            #[name = "title_entry"]
-                            gtk::Entry {
-                                #[watch]
-                                set_placeholder_text: Some(model.field_placeholder(TagField::Title)),
-                                connect_changed[sender, syncing] => move |entry| {
-                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::Title, entry.text().to_string())); }
-                                },
-                            },
-                            gtk::Label {
-                                #[watch]
-                                set_label: model.active_draft.validation_error(TagField::Title).unwrap_or(""),
-                                #[watch]
-                                set_visible: model.active_draft.validation_error(TagField::Title).is_some(),
-                                add_css_class: "error",
-                                set_halign: gtk::Align::Start,
-                            },
-                            gtk::Label { set_label: "艺人", set_halign: gtk::Align::Start },
-                            #[name = "artist_entry"]
-                            gtk::Entry {
-                                #[watch]
-                                set_placeholder_text: Some(model.field_placeholder(TagField::Artist)),
-                                connect_changed[sender, syncing] => move |entry| {
-                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::Artist, entry.text().to_string())); }
-                                },
-                            },
-                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::Artist).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::Artist).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                            gtk::Label { set_label: "专辑", set_halign: gtk::Align::Start },
-                            #[name = "album_entry"]
-                            gtk::Entry {
-                                #[watch]
-                                set_placeholder_text: Some(model.field_placeholder(TagField::Album)),
-                                connect_changed[sender, syncing] => move |entry| {
-                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::Album, entry.text().to_string())); }
-                                },
-                            },
-                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::Album).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::Album).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                            gtk::Label { set_label: "专辑艺人", set_halign: gtk::Align::Start },
-                            #[name = "album_artist_entry"]
-                            gtk::Entry {
-                                #[watch]
-                                set_placeholder_text: Some(model.field_placeholder(TagField::AlbumArtist)),
-                                connect_changed[sender, syncing] => move |entry| {
-                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::AlbumArtist, entry.text().to_string())); }
-                                },
-                            },
-                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::AlbumArtist).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::AlbumArtist).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                            gtk::Label { set_label: "年份", set_halign: gtk::Align::Start },
-                            #[name = "year_entry"]
-                            gtk::Entry {
-                                #[watch]
-                                set_placeholder_text: Some(model.field_placeholder(TagField::Year)),
-                                connect_changed[sender, syncing] => move |entry| {
-                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::Year, entry.text().to_string())); }
-                                },
-                            },
-                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::Year).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::Year).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                            gtk::Label { set_label: "曲目号", set_halign: gtk::Align::Start },
-                            #[name = "track_entry"]
-                            gtk::Entry {
-                                #[watch]
-                                set_placeholder_text: Some(model.field_placeholder(TagField::TrackNumber)),
-                                connect_changed[sender, syncing] => move |entry| {
-                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::TrackNumber, entry.text().to_string())); }
-                                },
-                            },
-                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::TrackNumber).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::TrackNumber).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                            gtk::Label { set_label: "碟号", set_halign: gtk::Align::Start },
-                            #[name = "disc_entry"]
-                            gtk::Entry {
-                                #[watch]
-                                set_placeholder_text: Some(model.field_placeholder(TagField::DiscNumber)),
-                                connect_changed[sender, syncing] => move |entry| {
-                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::DiscNumber, entry.text().to_string())); }
-                                },
-                            },
-                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::DiscNumber).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::DiscNumber).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
-                            gtk::Label { set_label: "流派", set_halign: gtk::Align::Start },
-                            #[name = "genre_entry"]
-                            gtk::Entry {
-                                #[watch]
-                                set_placeholder_text: Some(model.field_placeholder(TagField::Genre)),
-                                connect_changed[sender, syncing] => move |entry| {
-                                    if !syncing.get() { sender.input(AppMsg::SetField(TagField::Genre, entry.text().to_string())); }
-                                },
-                            },
-                            gtk::Label { #[watch] set_label: model.active_draft.validation_error(TagField::Genre).unwrap_or(""), #[watch] set_visible: model.active_draft.validation_error(TagField::Genre).is_some(), add_css_class: "error", set_halign: gtk::Align::Start },
+                            #[local_ref]
+                            form -> gtk::Box {},
 
                             },
                         },
@@ -906,6 +809,17 @@ impl Component for AppModel {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let album_cover_textures = Rc::new(RefCell::new(HashMap::new()));
+        let form = FormComponent::builder()
+            .launch(FormState::from_draft(
+                &TagDraft::default(),
+                &std::collections::HashSet::new(),
+                false,
+                false,
+                false,
+            ))
+            .forward(sender.input_sender(), |output| match output {
+                FormOutput::SetField(field, value) => AppMsg::SetField(field, value),
+            });
         let inspector = InspectorComponent::builder()
             .launch(InspectorState::default())
             .forward(sender.input_sender(), |output| match output {
@@ -954,10 +868,9 @@ impl Component for AppModel {
             close_dialog_open: false,
             draft_revision: 0,
             inspector,
+            form,
         };
-        let syncing = Rc::new(Cell::new(false));
         let rendered_cover_revision = Cell::new(u64::MAX);
-        let rendered_draft_revision = Cell::new(u64::MAX);
 
         if let Some(display) = gdk::Display::default() {
             gtk::IconTheme::for_display(&display)
@@ -1061,6 +974,7 @@ impl Component for AppModel {
         root.set_titlebar(Some(&header_bar));
 
         let tree_box = model.tree_rows.widget();
+        let form = model.form.widget();
         let inspector = model.inspector.widget();
         let editor_cover = Rc::new(RefCell::new(EditorCoverTransition::default()));
         let editor_cover_background = gtk::DrawingArea::new();
@@ -1536,28 +1450,45 @@ impl Component for AppModel {
                 model.cover_hint(),
                 !model.is_saving(),
             )));
+        model.form.emit(FormInput::SetState(FormState::from_draft(
+            &model.active_draft,
+            &model.mixed_fields,
+            model.selected_file.is_some(),
+            !model.is_saving(),
+            model.is_batch_editing(),
+        )));
         let can_undo = model.history.can_undo(&model.selected_paths);
         let can_redo = model.history.can_redo(&model.selected_paths);
         undo_button.set_sensitive(can_undo && !model.is_saving());
         redo_button.set_sensitive(can_redo && !model.is_saving());
-        if rendered_draft_revision.replace(model.draft_revision) != model.draft_revision {
-            syncing.set(true);
-            sync_entry(title_entry, &model.active_draft.title);
-            sync_entry(artist_entry, &model.active_draft.artist);
-            sync_entry(album_entry, &model.active_draft.album);
-            sync_entry(album_artist_entry, &model.active_draft.album_artist);
-            sync_entry(year_entry, &model.active_draft.year);
-            sync_entry(track_entry, &model.active_draft.track_number);
-            sync_entry(disc_entry, &model.active_draft.disc_number);
-            sync_entry(genre_entry, &model.active_draft.genre);
-            syncing.set(false);
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn form_state_preserves_mixed_field_placeholders_and_validation_errors() {
+        let draft = TagDraft {
+            title: "Song".into(),
+            year: "99".into(),
+            ..Default::default()
+        };
+        let mixed_fields = std::collections::HashSet::from([TagField::Artist]);
+
+        let state = FormState::from_draft(&draft, &mixed_fields, true, true, true);
+
+        assert!(state.visible);
+        assert!(state.is_sensitive);
+        assert!(state.is_batch_editing);
+        assert_eq!(state.placeholder(TagField::Artist), "多个值");
+        assert_eq!(state.value(TagField::Title), "Song");
+        assert_eq!(
+            state.validation_error(TagField::Year),
+            Some("请输入 1000 至 9999 的四位年份。")
+        );
+    }
 
     #[test]
     fn inspector_state_reflects_the_current_file_and_cover_draft() {
@@ -1595,292 +1526,5 @@ mod tests {
         };
 
         assert!(!pending.is_empty());
-    }
-}
-
-#[cfg(target_os = "macos")]
-use std::sync::OnceLock;
-
-#[cfg(target_os = "macos")]
-static MACOS_MENU_CALLBACK: OnceLock<Box<dyn Fn(AppMsg) + Send + Sync>> = OnceLock::new();
-
-#[cfg(target_os = "macos")]
-static MACOS_MENU_TARGET: OnceLock<objc2::rc::Retained<SleeveMenuHandler>> = OnceLock::new();
-
-#[cfg(target_os = "macos")]
-objc2::define_class!(
-    #[unsafe(super(objc2::runtime::NSObject))]
-    #[name = "SleeveMenuHandler"]
-    struct SleeveMenuHandler;
-
-    impl SleeveMenuHandler {
-        #[unsafe(method(handleMenuAction:))]
-        fn handle_menu_action(&self, sender: &objc2::runtime::NSObject) {
-            use objc2::msg_send;
-
-            let tag: isize = unsafe { msg_send![sender, tag] };
-            let message = match tag {
-                1 => AppMsg::ShowAbout,
-                2 => AppMsg::ChooseDirectory,
-                3 => AppMsg::Undo,
-                4 => AppMsg::Redo,
-                5 => AppMsg::ToggleSidebar,
-                6 => AppMsg::ToggleInspector,
-                7 => AppMsg::RequestClose,
-                _ => return,
-            };
-            if let Some(callback) = MACOS_MENU_CALLBACK.get() {
-                callback(message);
-            }
-        }
-    }
-);
-
-#[cfg(target_os = "macos")]
-impl SleeveMenuHandler {
-    objc2::extern_methods!(
-        #[unsafe(method(new))]
-        fn new() -> objc2::rc::Retained<Self>;
-    );
-}
-
-#[cfg(target_os = "macos")]
-fn configure_macos_menubar(_: &gtk::Window, sender: ComponentSender<AppModel>) {
-    use objc2::{MainThreadMarker, sel};
-    use objc2_app_kit::{NSApp, NSEventModifierFlags, NSMenu, NSMenuItem};
-
-    let menu_sender = sender.clone();
-    let (tx, rx) = std::sync::mpsc::channel::<AppMsg>();
-    let _ = MACOS_MENU_CALLBACK.set(Box::new(move |message| {
-        let _ = tx.send(message);
-    }));
-    glib::timeout_add_local(Duration::from_millis(50), move || {
-        while let Ok(message) = rx.try_recv() {
-            menu_sender.input(message);
-        }
-        glib::ControlFlow::Continue
-    });
-
-    let _ = MACOS_MENU_TARGET.set(SleeveMenuHandler::new());
-    let target = MACOS_MENU_TARGET
-        .get()
-        .expect("macOS menu target should be initialized");
-    let mtm = unsafe { MainThreadMarker::new_unchecked() };
-
-    unsafe {
-        let main_menu = NSMenu::init(mtm.alloc::<NSMenu>());
-        let app_menu_item = NSMenuItem::init(mtm.alloc::<NSMenuItem>());
-        let app_menu = NSMenu::init(mtm.alloc::<NSMenu>());
-        app_menu_item.setSubmenu(Some(&app_menu));
-        main_menu.addItem(&app_menu_item);
-
-        add_macos_callback_item(&app_menu, mtm, target, "关于 Sleeve", 1, None);
-        app_menu.addItem(&NSMenuItem::separatorItem(mtm));
-        add_macos_responder_item(
-            &app_menu,
-            mtm,
-            "隐藏 Sleeve",
-            sel!(hide:),
-            "h",
-            NSEventModifierFlags::Command,
-        );
-        add_macos_responder_item(
-            &app_menu,
-            mtm,
-            "隐藏其他",
-            sel!(hideOtherApplications:),
-            "h",
-            NSEventModifierFlags::Command | NSEventModifierFlags::Option,
-        );
-        add_macos_responder_item(
-            &app_menu,
-            mtm,
-            "全部显示",
-            sel!(unhideAllApplications:),
-            "",
-            NSEventModifierFlags::empty(),
-        );
-        app_menu.addItem(&NSMenuItem::separatorItem(mtm));
-        add_macos_callback_item(
-            &app_menu,
-            mtm,
-            target,
-            "退出 Sleeve",
-            7,
-            Some(("q", NSEventModifierFlags::Command)),
-        );
-
-        let file_menu = add_macos_submenu(&main_menu, mtm, "文件");
-        add_macos_callback_item(
-            &file_menu,
-            mtm,
-            target,
-            "打开目录…",
-            2,
-            Some(("o", NSEventModifierFlags::Command)),
-        );
-
-        let edit_menu = add_macos_submenu(&main_menu, mtm, "编辑");
-        add_macos_callback_item(
-            &edit_menu,
-            mtm,
-            target,
-            "撤销",
-            3,
-            Some(("z", NSEventModifierFlags::Command)),
-        );
-        add_macos_callback_item(
-            &edit_menu,
-            mtm,
-            target,
-            "重做",
-            4,
-            Some((
-                "z",
-                NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
-            )),
-        );
-        edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
-        add_macos_responder_item(
-            &edit_menu,
-            mtm,
-            "剪切",
-            sel!(cut:),
-            "x",
-            NSEventModifierFlags::Command,
-        );
-        add_macos_responder_item(
-            &edit_menu,
-            mtm,
-            "复制",
-            sel!(copy:),
-            "c",
-            NSEventModifierFlags::Command,
-        );
-        add_macos_responder_item(
-            &edit_menu,
-            mtm,
-            "粘贴",
-            sel!(paste:),
-            "v",
-            NSEventModifierFlags::Command,
-        );
-        edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
-        add_macos_responder_item(
-            &edit_menu,
-            mtm,
-            "全选",
-            sel!(selectAll:),
-            "a",
-            NSEventModifierFlags::Command,
-        );
-
-        let view_menu = add_macos_submenu(&main_menu, mtm, "显示");
-        add_macos_callback_item(&view_menu, mtm, target, "显示/隐藏文件列表", 5, None);
-        add_macos_callback_item(&view_menu, mtm, target, "显示/隐藏检查器", 6, None);
-
-        NSApp(mtm).setMainMenu(Some(&main_menu));
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn add_macos_submenu(
-    main_menu: &objc2_app_kit::NSMenu,
-    mtm: objc2::MainThreadMarker,
-    title: &str,
-) -> objc2::rc::Retained<objc2_app_kit::NSMenu> {
-    use objc2_app_kit::{NSMenu, NSMenuItem};
-    use objc2_foundation::NSString;
-
-    let item = NSMenuItem::init(mtm.alloc::<NSMenuItem>());
-    let menu = NSMenu::init(mtm.alloc::<NSMenu>());
-    menu.setTitle(&NSString::from_str(title));
-    item.setSubmenu(Some(&menu));
-    main_menu.addItem(&item);
-    menu
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn add_macos_callback_item(
-    menu: &objc2_app_kit::NSMenu,
-    mtm: objc2::MainThreadMarker,
-    target: &SleeveMenuHandler,
-    title: &str,
-    tag: isize,
-    shortcut: Option<(&str, objc2_app_kit::NSEventModifierFlags)>,
-) {
-    use objc2::sel;
-    use objc2_app_kit::NSMenuItem;
-    use objc2_foundation::NSString;
-
-    let item = NSMenuItem::init(mtm.alloc::<NSMenuItem>());
-    item.setTitle(&NSString::from_str(title));
-    unsafe {
-        item.setAction(Some(sel!(handleMenuAction:)));
-        item.setTarget(Some(target));
-    }
-    item.setTag(tag);
-    if let Some((key, modifiers)) = shortcut {
-        item.setKeyEquivalent(&NSString::from_str(key));
-        item.setKeyEquivalentModifierMask(modifiers);
-    }
-    menu.addItem(&item);
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn add_macos_responder_item(
-    menu: &objc2_app_kit::NSMenu,
-    mtm: objc2::MainThreadMarker,
-    title: &str,
-    action: objc2::runtime::Sel,
-    key: &str,
-    modifiers: objc2_app_kit::NSEventModifierFlags,
-) {
-    use objc2_app_kit::NSMenuItem;
-    use objc2_foundation::NSString;
-
-    let item = NSMenuItem::init(mtm.alloc::<NSMenuItem>());
-    item.setTitle(&NSString::from_str(title));
-    unsafe {
-        item.setAction(Some(action));
-        item.setTarget(None);
-    }
-    item.setKeyEquivalent(&NSString::from_str(key));
-    item.setKeyEquivalentModifierMask(modifiers);
-    menu.addItem(&item);
-}
-
-#[cfg(not(target_os = "macos"))]
-fn configure_macos_menubar(_: &gtk::Window, _: ComponentSender<AppModel>) {}
-
-#[cfg(target_os = "macos")]
-fn configure_macos_window(window: &gtk::Window) {
-    use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
-
-    window.connect_realize(|window| {
-        let Some(surface) = window.surface() else {
-            return;
-        };
-        let Some(macos_surface) = surface.downcast_ref::<gdk4_macos::MacosSurface>() else {
-            return;
-        };
-        let native_window = macos_surface.native();
-        let ns_window = unsafe { &*(native_window as *const NSWindow) };
-        ns_window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenNone);
-    });
-}
-
-#[cfg(target_os = "macos")]
-fn configure_macos_window_style() {
-    let provider = gtk::CssProvider::new();
-    provider.load_from_data(
-        "window, .background, .titlebar, headerbar, .window-frame { border-radius: 0px; }",
-    );
-    if let Some(display) = gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
     }
 }
