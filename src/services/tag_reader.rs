@@ -74,7 +74,9 @@ fn inspect_media(path: &Path, size: u64) -> AudioMetadata {
             .skip_to_latest()
             .and_then(|metadata| encoder_from_tags(metadata.tags()))
     };
-    let encoder = probe_encoder.or(format_encoder);
+    let encoder = probe_encoder
+        .or(format_encoder)
+        .or_else(|| flac_vendor_from_file(path));
     let track = match format.default_track().or_else(|| format.tracks().first()) {
         Some(track) => track,
         None => return fallback_metadata(path, size),
@@ -120,6 +122,62 @@ fn inspect_media(path: &Path, size: u64) -> AudioMetadata {
         bits_per_sample,
         file_size: Some(format_file_size(size)),
     }
+}
+
+fn flac_vendor_from_file(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| extension.eq_ignore_ascii_case("flac"))
+        .and_then(|_| fs::read(path).ok())
+        .and_then(|bytes| flac_vendor_string(&bytes))
+}
+
+fn flac_vendor_string(bytes: &[u8]) -> Option<String> {
+    let mut offset = flac_marker_offset(bytes)? + 4;
+
+    loop {
+        let header = bytes.get(offset..offset + 4)?;
+        let is_last = header[0] & 0x80 != 0;
+        let block_type = header[0] & 0x7f;
+        let block_length =
+            usize::try_from(u32::from_be_bytes([0, header[1], header[2], header[3]])).ok()?;
+        offset += 4;
+        let block = bytes.get(offset..offset + block_length)?;
+
+        if block_type == 4 {
+            let vendor_length =
+                usize::try_from(u32::from_le_bytes(block.get(..4)?.try_into().ok()?)).ok()?;
+            let vendor = std::str::from_utf8(block.get(4..4 + vendor_length)?)
+                .ok()?
+                .trim();
+            let vendor = vendor.strip_prefix("reference ").unwrap_or(vendor);
+            return (!vendor.is_empty()).then(|| vendor.to_owned());
+        }
+        if is_last {
+            return None;
+        }
+        offset += block_length;
+    }
+}
+
+fn flac_marker_offset(bytes: &[u8]) -> Option<usize> {
+    if bytes.starts_with(b"fLaC") {
+        return Some(0);
+    }
+    let header = bytes.get(..10)?;
+    if &header[..3] != b"ID3" {
+        return None;
+    }
+
+    let tag_size = header[6..10].iter().try_fold(0usize, |size, byte| {
+        (*byte <= 0x7f).then_some((size << 7) | usize::from(*byte))
+    })?;
+    let footer_size = usize::from(header[5] & 0x10 != 0) * 10;
+    let marker_offset = 10usize.checked_add(tag_size)?.checked_add(footer_size)?;
+    bytes
+        .get(marker_offset..marker_offset + 4)
+        .filter(|marker| *marker == b"fLaC")
+        .map(|_| marker_offset)
 }
 
 fn is_m4a(path: &Path) -> bool {
@@ -227,6 +285,48 @@ mod tests {
         assert_eq!(
             encoder_from_tags(&settings),
             Some("-compression_level 8".into())
+        );
+    }
+
+    #[test]
+    fn reads_flac_vorbis_comment_vendor_as_encoder() {
+        let vendor = b"reference libFLAC 1.2.1 20070917";
+        let mut comment = Vec::new();
+        comment.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+        comment.extend_from_slice(vendor);
+        comment.extend_from_slice(&0u32.to_le_bytes());
+
+        let mut flac = b"fLaC".to_vec();
+        flac.push(0x80 | 4);
+        flac.extend_from_slice(&(comment.len() as u32).to_be_bytes()[1..]);
+        flac.extend_from_slice(&comment);
+
+        assert_eq!(
+            flac_vendor_string(&flac),
+            Some("libFLAC 1.2.1 20070917".into())
+        );
+    }
+
+    #[test]
+    fn reads_flac_vendor_after_id3v2_prefix() {
+        let vendor = b"reference libFLAC 1.3.1 20141125";
+        let mut comment = Vec::new();
+        comment.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+        comment.extend_from_slice(vendor);
+        comment.extend_from_slice(&0u32.to_le_bytes());
+
+        let mut flac = b"fLaC".to_vec();
+        flac.push(0x80 | 4);
+        flac.extend_from_slice(&(comment.len() as u32).to_be_bytes()[1..]);
+        flac.extend_from_slice(&comment);
+
+        let mut id3 = b"ID3\x03\0\0\0\0\0\x05".to_vec();
+        id3.extend_from_slice(b"abcde");
+        id3.extend_from_slice(&flac);
+
+        assert_eq!(
+            flac_vendor_string(&id3),
+            Some("libFLAC 1.3.1 20141125".into())
         );
     }
 
