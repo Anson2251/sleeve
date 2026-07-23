@@ -5,7 +5,7 @@ use relm4::ComponentSender;
 use super::{AppModel, AppMsg};
 
 use {
-    relm4::gtk::gdk,
+    relm4::gtk::{self, gdk},
     std::{sync::OnceLock, time::Duration},
 };
 
@@ -48,7 +48,7 @@ impl SleeveMenuHandler {
     );
 }
 
-pub(super) fn configure_menubar(
+pub(super) fn configure_macos_menubar(
     _: &gtk::Window,
     _: &gtk::HeaderBar,
     sender: ComponentSender<AppModel>,

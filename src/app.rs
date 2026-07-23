@@ -52,6 +52,7 @@ use inspector::{InspectorComponent, InspectorInput, InspectorOutput, InspectorSt
 use macos::{configure_macos_menubar, configure_macos_window, configure_macos_window_style};
 
 struct HeaderBarWidgets {
+    header_bar: gtk::HeaderBar,
     sidebar_button: gtk::ToggleButton,
     inspector_button: gtk::ToggleButton,
     status_label: gtk::Label,
@@ -274,6 +275,7 @@ fn init_header_bar(
     root.set_titlebar(Some(&header_bar));
 
     HeaderBarWidgets {
+        header_bar,
         sidebar_button,
         inspector_button,
         status_label,
@@ -1173,6 +1175,7 @@ impl Component for AppModel {
         }
 
         let HeaderBarWidgets {
+            header_bar,
             sidebar_button,
             inspector_button,
             status_label,
@@ -1214,7 +1217,7 @@ impl Component for AppModel {
         {
             configure_macos_window(&root);
             configure_macos_window_style();
-            configure_macos_menubar(&root, sender.clone());
+            configure_macos_menubar(&root, &header_bar, sender.clone());
         }
 
         let key_controller = gtk::EventControllerKey::new();
