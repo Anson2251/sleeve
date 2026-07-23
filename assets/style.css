@@ -34,6 +34,7 @@
 
 .editor-cover-background {
     opacity: 0.2;
+    filter: saturate(0.7) sepia(0.3);
 }
 
 .batch-save-warning {
