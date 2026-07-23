@@ -59,6 +59,7 @@
   "tooltip.redo": "重做（⇧⌘Z / Ctrl+Shift+Z）",
   "tooltip.save": "保存",
   "tooltip.batch_unsaved": "批量编辑尚未保存",
+  "tooltip.menu": "菜单",
   "app.saving_before_switch": "正在保存标签，请稍后再切换目录。",
   "app.batch_unsaved": "批量编辑尚未保存，请先点击保存按钮。",
   "app.scanning": "正在扫描 {path}…",

@@ -1,23 +1,18 @@
-use relm4::{ComponentSender, gtk};
-
-#[cfg(target_os = "macos")]
 use relm4::gtk::prelude::{Cast, NativeExt, WidgetExt};
+
+use relm4::ComponentSender;
 
 use super::{AppModel, AppMsg};
 
-#[cfg(target_os = "macos")]
 use {
     relm4::gtk::gdk,
     std::{sync::OnceLock, time::Duration},
 };
 
-#[cfg(target_os = "macos")]
 static MACOS_MENU_CALLBACK: OnceLock<Box<dyn Fn(AppMsg) + Send + Sync>> = OnceLock::new();
 
-#[cfg(target_os = "macos")]
 static MACOS_MENU_TARGET: OnceLock<objc2::rc::Retained<SleeveMenuHandler>> = OnceLock::new();
 
-#[cfg(target_os = "macos")]
 objc2::define_class!(
     #[unsafe(super(objc2::runtime::NSObject))]
     #[name = "SleeveMenuHandler"]
@@ -46,7 +41,6 @@ objc2::define_class!(
     }
 );
 
-#[cfg(target_os = "macos")]
 impl SleeveMenuHandler {
     objc2::extern_methods!(
         #[unsafe(method(new))]
@@ -54,8 +48,11 @@ impl SleeveMenuHandler {
     );
 }
 
-#[cfg(target_os = "macos")]
-pub(super) fn configure_macos_menubar(_: &gtk::Window, sender: ComponentSender<AppModel>) {
+pub(super) fn configure_menubar(
+    _: &gtk::Window,
+    _: &gtk::HeaderBar,
+    sender: ComponentSender<AppModel>,
+) {
     use objc2::{MainThreadMarker, sel};
     use objc2_app_kit::{NSApp, NSEventModifierFlags, NSMenu, NSMenuItem};
 
@@ -207,7 +204,6 @@ pub(super) fn configure_macos_menubar(_: &gtk::Window, sender: ComponentSender<A
     }
 }
 
-#[cfg(target_os = "macos")]
 unsafe fn add_macos_submenu(
     main_menu: &objc2_app_kit::NSMenu,
     mtm: objc2::MainThreadMarker,
@@ -224,7 +220,6 @@ unsafe fn add_macos_submenu(
     menu
 }
 
-#[cfg(target_os = "macos")]
 unsafe fn add_macos_callback_item(
     menu: &objc2_app_kit::NSMenu,
     mtm: objc2::MainThreadMarker,
@@ -251,7 +246,6 @@ unsafe fn add_macos_callback_item(
     menu.addItem(&item);
 }
 
-#[cfg(target_os = "macos")]
 unsafe fn add_macos_responder_item(
     menu: &objc2_app_kit::NSMenu,
     mtm: objc2::MainThreadMarker,
@@ -274,10 +268,6 @@ unsafe fn add_macos_responder_item(
     menu.addItem(&item);
 }
 
-#[cfg(not(target_os = "macos"))]
-pub(super) fn configure_macos_menubar(_: &gtk::Window, _: ComponentSender<AppModel>) {}
-
-#[cfg(target_os = "macos")]
 pub(super) fn configure_macos_window(window: &gtk::Window) {
     use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
 
@@ -294,7 +284,6 @@ pub(super) fn configure_macos_window(window: &gtk::Window) {
     });
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn configure_macos_window_style() {
     let provider = gtk::CssProvider::new();
     provider.load_from_data(
@@ -308,9 +297,3 @@ pub(super) fn configure_macos_window_style() {
         );
     }
 }
-
-#[cfg(not(target_os = "macos"))]
-pub(super) fn configure_macos_window(_: &gtk::Window) {}
-
-#[cfg(not(target_os = "macos"))]
-pub(super) fn configure_macos_window_style() {}

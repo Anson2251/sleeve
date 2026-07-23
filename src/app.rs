@@ -32,6 +32,8 @@ mod dialogs;
 mod form;
 mod history;
 mod inspector;
+
+#[cfg(target_os = "macos")]
 mod macos;
 
 use cover::{
@@ -45,7 +47,242 @@ use history::{
     rollback_history_batch,
 };
 use inspector::{InspectorComponent, InspectorInput, InspectorOutput, InspectorState};
+
+#[cfg(target_os = "macos")]
 use macos::{configure_macos_menubar, configure_macos_window, configure_macos_window_style};
+
+struct HeaderBarWidgets {
+    sidebar_button: gtk::ToggleButton,
+    inspector_button: gtk::ToggleButton,
+    status_label: gtk::Label,
+    undo_button: gtk::Button,
+    redo_button: gtk::Button,
+    save_button: gtk::Button,
+    batch_save_warning: gtk::Image,
+}
+
+#[cfg(not(target_os = "macos"))]
+fn get_menu_btn(window: &gtk::Window, sender: ComponentSender<AppModel>) -> gtk::MenuButton {
+    use relm4::gtk::gio::{Menu, MenuItem, SimpleAction, SimpleActionGroup};
+    use relm4::gtk::prelude::*;
+
+    let menu = Menu::new();
+
+    // About section
+    let about_section = Menu::new();
+    about_section.append_item(&MenuItem::new(
+        Some(&crate::t!("menu.about")),
+        Some("win.about"),
+    ));
+    menu.append_section(None, &about_section);
+
+    // File submenu
+    let file_submenu = Menu::new();
+    file_submenu.append_item(&MenuItem::new(
+        Some(&crate::t!("menu.open_folder")),
+        Some("win.open-folder"),
+    ));
+    let file_section = Menu::new();
+    file_section.append_item(&MenuItem::new_submenu(
+        Some(&crate::t!("menu.file")),
+        &file_submenu,
+    ));
+    menu.append_section(None, &file_section);
+
+    // Edit submenu
+    let edit_submenu = Menu::new();
+    edit_submenu.append_item(&MenuItem::new(
+        Some(&crate::t!("menu.undo")),
+        Some("win.undo"),
+    ));
+    edit_submenu.append_item(&MenuItem::new(
+        Some(&crate::t!("menu.redo")),
+        Some("win.redo"),
+    ));
+    let edit_section = Menu::new();
+    edit_section.append_item(&MenuItem::new_submenu(
+        Some(&crate::t!("menu.edit")),
+        &edit_submenu,
+    ));
+    menu.append_section(None, &edit_section);
+
+    // View submenu
+    let view_submenu = Menu::new();
+    view_submenu.append_item(&MenuItem::new(
+        Some(&crate::t!("menu.toggle_files")),
+        Some("win.toggle-sidebar"),
+    ));
+    view_submenu.append_item(&MenuItem::new(
+        Some(&crate::t!("menu.toggle_inspector")),
+        Some("win.toggle-inspector"),
+    ));
+    let view_section = Menu::new();
+    view_section.append_item(&MenuItem::new_submenu(
+        Some(&crate::t!("menu.view")),
+        &view_submenu,
+    ));
+    menu.append_section(None, &view_section);
+
+    // Quit section
+    let quit_section = Menu::new();
+    quit_section.append_item(&MenuItem::new(
+        Some(&crate::t!("menu.quit")),
+        Some("win.quit"),
+    ));
+    menu.append_section(None, &quit_section);
+
+    // Actions
+    let actions = SimpleActionGroup::new();
+
+    let about = SimpleAction::new("about", None);
+    let s = sender.clone();
+    about.connect_activate(move |_, _| s.input(AppMsg::ShowAbout));
+    actions.add_action(&about);
+
+    let open_folder = SimpleAction::new("open-folder", None);
+    let s = sender.clone();
+    open_folder.connect_activate(move |_, _| s.input(AppMsg::ChooseDirectory));
+    actions.add_action(&open_folder);
+
+    let undo = SimpleAction::new("undo", None);
+    let s = sender.clone();
+    undo.connect_activate(move |_, _| s.input(AppMsg::Undo));
+    actions.add_action(&undo);
+
+    let redo = SimpleAction::new("redo", None);
+    let s = sender.clone();
+    redo.connect_activate(move |_, _| s.input(AppMsg::Redo));
+    actions.add_action(&redo);
+
+    let toggle_sidebar = SimpleAction::new("toggle-sidebar", None);
+    let s = sender.clone();
+    toggle_sidebar.connect_activate(move |_, _| s.input(AppMsg::ToggleSidebar));
+    actions.add_action(&toggle_sidebar);
+
+    let toggle_inspector = SimpleAction::new("toggle-inspector", None);
+    let s = sender.clone();
+    toggle_inspector.connect_activate(move |_, _| s.input(AppMsg::ToggleInspector));
+    actions.add_action(&toggle_inspector);
+
+    let quit = SimpleAction::new("quit", None);
+    quit.connect_activate(move |_, _| sender.input(AppMsg::RequestClose));
+    actions.add_action(&quit);
+
+    window.insert_action_group("win", Some(&actions));
+
+    let popover = gtk::PopoverMenu::from_model(Some(&menu));
+    gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .tooltip_text(crate::t!("tooltip.menu"))
+        .popover(&popover)
+        .build()
+}
+
+fn init_header_bar(
+    root: &gtk::Window,
+    sender: &ComponentSender<AppModel>,
+    header_title: &str,
+) -> HeaderBarWidgets {
+    let header_bar = gtk::HeaderBar::new();
+    header_bar.set_show_title_buttons(true);
+    #[cfg(target_os = "macos")]
+    header_bar.set_property("use-native-controls", true);
+
+    #[cfg(not(target_os = "macos"))]
+    header_bar.pack_end(&get_menu_btn(&root, sender.clone()));
+
+    let sidebar_button = gtk::ToggleButton::builder()
+        .icon_name("sidebar-show-symbolic")
+        .tooltip_text(crate::t!("tooltip.toggle_sidebar"))
+        .sensitive(false)
+        .build();
+    let sidebar_sender = sender.clone();
+    sidebar_button.connect_toggled(move |button| {
+        sidebar_sender.input(AppMsg::SetSidebarVisible(button.is_active()))
+    });
+    header_bar.pack_start(&sidebar_button);
+
+    let open_directory = gtk::Button::builder()
+        .icon_name("folder-open-symbolic")
+        .tooltip_text(crate::t!("tooltip.open_folder"))
+        .build();
+    let open_sender = sender.clone();
+    open_directory.connect_clicked(move |_| open_sender.input(AppMsg::ChooseDirectory));
+    header_bar.pack_start(&open_directory);
+
+    let inspector_button = gtk::ToggleButton::builder()
+        .icon_name("dialog-information-symbolic")
+        .tooltip_text(crate::t!("tooltip.toggle_inspector"))
+        .sensitive(false)
+        .build();
+    let inspector_sender = sender.clone();
+    inspector_button.connect_toggled(move |button| {
+        inspector_sender.input(AppMsg::SetInspectorVisible(button.is_active()))
+    });
+    header_bar.pack_end(&inspector_button);
+
+    let undo_button = gtk::Button::builder()
+        .icon_name("edit-undo-symbolic")
+        .tooltip_text(crate::t!("tooltip.undo"))
+        .sensitive(false)
+        .build();
+    let undo_sender = sender.clone();
+    undo_button.connect_clicked(move |_| undo_sender.input(AppMsg::Undo));
+
+    let redo_button = gtk::Button::builder()
+        .icon_name("edit-redo-symbolic")
+        .tooltip_text(crate::t!("tooltip.redo"))
+        .sensitive(false)
+        .build();
+    let redo_sender = sender.clone();
+    redo_button.connect_clicked(move |_| redo_sender.input(AppMsg::Redo));
+
+    let save_button = gtk::Button::builder()
+        .icon_name("document-save-symbolic")
+        .tooltip_text(crate::t!("tooltip.save"))
+        .sensitive(false)
+        .build();
+    let save_sender = sender.clone();
+    save_button.connect_clicked(move |_| save_sender.input(AppMsg::SaveNow));
+
+    #[cfg(target_os = "macos")]
+    {
+        header_bar.pack_end(&undo_button);
+        header_bar.pack_end(&redo_button);
+        header_bar.pack_end(&save_button);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        header_bar.pack_start(&redo_button);
+        header_bar.pack_start(&undo_button);
+        header_bar.pack_start(&save_button);
+    }
+
+    let batch_save_warning = gtk::Image::builder()
+        .icon_name("dialog-warning-symbolic")
+        .tooltip_text(crate::t!("tooltip.batch_unsaved"))
+        .visible(false)
+        .build();
+    batch_save_warning.add_css_class("batch-save-warning");
+    header_bar.pack_end(&batch_save_warning);
+
+    let status_label = gtk::Label::builder()
+        .label(header_title)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .build();
+    header_bar.set_title_widget(Some(&status_label));
+    root.set_titlebar(Some(&header_bar));
+
+    HeaderBarWidgets {
+        sidebar_button,
+        inspector_button,
+        status_label,
+        undo_button,
+        redo_button,
+        save_button,
+        batch_save_warning,
+    }
+}
 
 pub struct AppModel {
     root_directory: Option<PathBuf>,
@@ -925,41 +1162,6 @@ impl Component for AppModel {
                 .add_resource_path("/com/github/anson2251/sleeve/icons");
         }
 
-        let header_bar = gtk::HeaderBar::new();
-        header_bar.set_show_title_buttons(true);
-        #[cfg(target_os = "macos")]
-        header_bar.set_property("use-native-controls", true);
-
-        let sidebar_button = gtk::ToggleButton::builder()
-            .icon_name("sidebar-show-symbolic")
-            .tooltip_text(crate::t!("tooltip.toggle_sidebar"))
-            .sensitive(false)
-            .build();
-        let sidebar_sender = sender.clone();
-        sidebar_button.connect_toggled(move |button| {
-            sidebar_sender.input(AppMsg::SetSidebarVisible(button.is_active()))
-        });
-        header_bar.pack_start(&sidebar_button);
-
-        let open_directory = gtk::Button::builder()
-            .icon_name("folder-open-symbolic")
-            .tooltip_text(crate::t!("tooltip.open_folder"))
-            .build();
-        let open_sender = sender.clone();
-        open_directory.connect_clicked(move |_| open_sender.input(AppMsg::ChooseDirectory));
-        header_bar.pack_start(&open_directory);
-
-        let inspector_button = gtk::ToggleButton::builder()
-            .icon_name("dialog-information-symbolic")
-            .tooltip_text(crate::t!("tooltip.toggle_inspector"))
-            .sensitive(false)
-            .build();
-        let inspector_sender = sender.clone();
-        inspector_button.connect_toggled(move |button| {
-            inspector_sender.input(AppMsg::SetInspectorVisible(button.is_active()))
-        });
-        header_bar.pack_end(&inspector_button);
-
         let style_provider = gtk::CssProvider::new();
         style_provider.load_from_resource("/com/github/anson2251/sleeve/style.css");
         if let Some(display) = gdk::Display::default() {
@@ -970,47 +1172,15 @@ impl Component for AppModel {
             );
         }
 
-        let undo_button = gtk::Button::builder()
-            .icon_name("edit-undo-symbolic")
-            .tooltip_text(crate::t!("tooltip.undo"))
-            .sensitive(false)
-            .build();
-        let undo_sender = sender.clone();
-        undo_button.connect_clicked(move |_| undo_sender.input(AppMsg::Undo));
-        header_bar.pack_end(&undo_button);
-
-        let redo_button = gtk::Button::builder()
-            .icon_name("edit-redo-symbolic")
-            .tooltip_text(crate::t!("tooltip.redo"))
-            .sensitive(false)
-            .build();
-        let redo_sender = sender.clone();
-        redo_button.connect_clicked(move |_| redo_sender.input(AppMsg::Redo));
-        header_bar.pack_end(&redo_button);
-
-        let save_button = gtk::Button::builder()
-            .icon_name("document-save-symbolic")
-            .tooltip_text(crate::t!("tooltip.save"))
-            .sensitive(false)
-            .build();
-        let save_sender = sender.clone();
-        save_button.connect_clicked(move |_| save_sender.input(AppMsg::SaveNow));
-        header_bar.pack_end(&save_button);
-
-        let batch_save_warning = gtk::Image::builder()
-            .icon_name("dialog-warning-symbolic")
-            .tooltip_text(crate::t!("tooltip.batch_unsaved"))
-            .visible(false)
-            .build();
-        batch_save_warning.add_css_class("batch-save-warning");
-        header_bar.pack_end(&batch_save_warning);
-
-        let status_label = gtk::Label::builder()
-            .label(model.header_title())
-            .ellipsize(gtk::pango::EllipsizeMode::End)
-            .build();
-        header_bar.set_title_widget(Some(&status_label));
-        root.set_titlebar(Some(&header_bar));
+        let HeaderBarWidgets {
+            sidebar_button,
+            inspector_button,
+            status_label,
+            undo_button,
+            redo_button,
+            save_button,
+            batch_save_warning,
+        } = init_header_bar(&root, &sender, &model.header_title());
 
         let tree_box = model.tree_rows.widget();
         let form = model.form.widget();
@@ -1040,9 +1210,12 @@ impl Component for AppModel {
         let widgets = view_output!();
         widgets.editor.set_child(Some(&editor_cover_background));
 
-        configure_macos_window(&root);
-        configure_macos_window_style();
-        configure_macos_menubar(&root, sender.clone());
+        #[cfg(target_os = "macos")]
+        {
+            configure_macos_window(&root);
+            configure_macos_window_style();
+            configure_macos_menubar(&root, sender.clone());
+        }
 
         let key_controller = gtk::EventControllerKey::new();
         key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);

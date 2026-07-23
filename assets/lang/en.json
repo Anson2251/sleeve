@@ -59,6 +59,7 @@
   "tooltip.redo": "Redo (⇧⌘Z / Ctrl+Shift+Z)",
   "tooltip.save": "Save",
   "tooltip.batch_unsaved": "Batch edits have not been saved",
+  "tooltip.menu": "Menu",
   "app.saving_before_switch": "Saving tags; wait before switching folders.",
   "app.batch_unsaved": "Batch edits have not been saved. Click Save first.",
   "app.scanning": "Scanning {path}…",
