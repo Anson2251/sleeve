@@ -81,15 +81,28 @@ impl FactoryComponent for TreeRowComponent {
 
     view! {
         #[root]
-        gtk::Button {
+        gtk::Box {
             set_halign: gtk::Align::Fill,
-            add_css_class: "flat",
+            set_focusable: true,
             add_css_class: "file-tree-row",
             #[watch]
             set_class_active: ("selected", self.selected),
+            set_cursor: gdk::Cursor::from_name("pointer", None).as_ref(),
             add_controller = gtk::GestureClick {
                 connect_pressed[sender] => move |gesture, _, _, _| {
                     sender.input(TreeRowMsg::Activate(gesture.current_event_state()));
+                },
+            },
+            add_controller = gtk::EventControllerKey {
+                connect_key_pressed[sender] => move |_controller, keyval, _keycode, state| {
+                    if keyval == gdk::Key::Return
+                        || keyval == gdk::Key::KP_Enter
+                        || keyval == gdk::Key::space
+                    {
+                        sender.input(TreeRowMsg::Activate(state));
+                        return glib::Propagation::Stop;
+                    }
+                    glib::Propagation::Proceed
                 },
             },
             gtk::Box {
@@ -119,7 +132,6 @@ impl FactoryComponent for TreeRowComponent {
                     #[wrap(Some)]
                     set_child = &gtk::Picture {
                         add_css_class: "tree-thumbnail",
-                        set_size_request: (ALBUM_ICON_SIZE, ALBUM_ICON_SIZE),
                         set_keep_aspect_ratio: true,
                         set_can_shrink: true,
                         #[watch]
