@@ -190,7 +190,7 @@ fn init_header_bar(
     header_bar.set_property("use-native-controls", true);
 
     #[cfg(not(target_os = "macos"))]
-    header_bar.pack_end(&get_menu_btn(&root, sender.clone()));
+    header_bar.pack_end(&get_menu_btn(root, sender.clone()));
 
     let sidebar_button = gtk::ToggleButton::builder()
         .icon_name("sidebar-show-symbolic")
@@ -1175,6 +1175,7 @@ impl Component for AppModel {
         }
 
         let HeaderBarWidgets {
+            #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
             header_bar,
             sidebar_button,
             inspector_button,
