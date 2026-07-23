@@ -126,12 +126,21 @@ fn lang_dir() -> PathBuf {
             if languages.is_dir() {
                 return languages;
             }
+            let fhs_languages = ancestor.join("share/sleeve/lang");
+            if fhs_languages.is_dir() {
+                return fhs_languages;
+            }
         }
     }
 
     let current_directory_languages = PathBuf::from("assets/lang");
     if current_directory_languages.is_dir() {
         return current_directory_languages;
+    }
+
+    let fhs_languages = PathBuf::from("share/sleeve/lang");
+    if fhs_languages.is_dir() {
+        return fhs_languages;
     }
 
     PathBuf::from("assets/lang")
