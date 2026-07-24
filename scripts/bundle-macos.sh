@@ -28,7 +28,9 @@ set -euo pipefail
 APP_NAME="Sleeve"
 BINARY_NAME="sleeve"
 IDENTIFIER="com.github.anson2251.sleeve"
-VERSION="0.1.0"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+VERSION="$(sed -nE 's/^version = "([^"]+)"/\1/p' "$PROJECT_DIR/Cargo.toml" | head -n 1)"
 MIN_OS_VERSION="11.0"
 
 BUILD_DIR="target/release"
