@@ -73,6 +73,34 @@ brew install dylibbundler
 
 产物会生成在 `dist/`。打包脚本会将 GTK4、libadwaita 及所需运行时资源放入 `.app`，因此使用生成的 `.app` 或 DMG **不需要**预先安装 GTK4 或 libadwaita。
 
+### Windows（MSYS2/UCRT64）
+
+在 MSYS2 UCRT64 环境中安装依赖：
+
+```sh
+pacman -S ucrt64/mingw-w64-ucrt-x86_64-gcc
+pacman -S ucrt64/mingw-w64-ucrt-x86_64-cc
+pacman -S ucrt64/mingw-w64-ucrt-x86_64-pkg-config
+pacman -S ucrt64/mingw-w64-ucrt-x86_64-libadwaita
+pacman -S ucrt64/mingw-w64-ucrt-x86_64-rustup
+rustup toolchain install stable-gnu
+pacman -S zip
+```
+
+构建并运行：
+
+```sh
+cargo run
+```
+
+打包为单文件可执行文件：
+
+```sh
+./scripts/bundle-msys2.sh
+```
+
+产物位于 `dist/`：`Sleeve-<version>.exe`（单文件）和 `Sleeve-<version>.zip`（压缩包），无需 MSYS2 即可运行。
+
 ### Linux（Debian/Ubuntu）
 
 ```sh
